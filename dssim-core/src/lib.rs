@@ -18,6 +18,7 @@ mod image;
 #[cfg(not(feature = "threads"))]
 mod lieon;
 mod linear;
+#[allow(unsafe_code)]
 mod tolab;
 mod val;
 
