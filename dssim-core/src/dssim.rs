@@ -141,19 +141,9 @@ impl DssimChan<f32> {
 
 impl Channable<f32, f32> for DssimChan<f32> {
     fn img1_img2_blur(&self, modified: &Self, tmp32: &mut [MaybeUninit<f32>]) -> Vec<f32> {
+        let src = self.img.as_ref().unwrap();
         let modified_img = modified.img.as_ref().unwrap();
-
-        let mut out = self.img.as_ref().unwrap().pixels().zip(modified_img.pixels()).map(|(px1, px2)| {
-            debug_assert!(px1 <= 1.0 && px1 >= 0.0);
-            debug_assert!(px2 <= 1.0 && px2 >= 0.0);
-            px1 * px2
-        }).collect::<Vec<_>>();
-
-        let width = modified_img.width();
-        let height = modified_img.height();
-        debug_assert_eq!(out.len(), width * height);
-        blur::blur_in_place(ImgRefMut::new(&mut out, width, height), tmp32);
-        out
+        blur::blur_mul(src.as_ref(), modified_img.as_ref(), tmp32)
     }
 }
 

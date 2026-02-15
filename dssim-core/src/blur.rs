@@ -58,6 +58,16 @@ mod mac {
         do_blur(&srcbuf, tmp, &mut dstbuf, srcdst.width(), srcdst.height());
     }
 
+    /// Blur the element-wise product of two images. On macOS, falls back to
+    /// multiply then blur since vImage has no fused variant.
+    pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [MaybeUninit<f32>]) -> Vec<f32> {
+        let width = src1.width();
+        let height = src1.height();
+        let mut product: Vec<f32> = src1.pixels().zip(src2.pixels()).map(|(a, b)| a * b).collect();
+        blur_in_place(ImgRefMut::new(&mut product, width, height), tmp);
+        product
+    }
+
     fn do_blur(srcbuf: &vImage_Buffer<*const f32>, tmp: &mut [MaybeUninit<f32>], dstbuf: &mut vImage_Buffer<*mut f32>, width: usize, height: usize) {
         assert_eq!(tmp.len(), width * height);
 
@@ -171,6 +181,66 @@ mod portable {
         blur_v(tmp, buf, width, height, stride);
         blur_h(buf, tmp, width, height, stride);
         blur_v(tmp, buf, width, height, stride);
+    }
+
+    /// Horizontal blur with fused element-wise multiply.
+    /// Computes blur(src1 * src2) by integrating the multiply into the first H pass,
+    /// avoiding the need to allocate and fill an intermediate product buffer.
+    #[inline(never)]
+    fn blur_h_mul(src1: &[f32], src2: &[f32], dst: &mut [f32], width: usize, height: usize, stride1: usize, stride2: usize) {
+        for y in 0..height {
+            let r1 = &src1[y * stride1..][..width];
+            let r2 = &src2[y * stride2..][..width];
+            let out = &mut dst[y * width..][..width];
+
+            // Sliding window of products to avoid redundant multiplies
+            let mut p_prev = r1[0] * r2[0];
+            let mut p_curr = p_prev;
+            let mut p_next = if width > 1 { r1[1] * r2[1] } else { p_curr };
+
+            // Left edge: clamp left neighbor to position 0
+            out[0] = (p_curr + p_next) * K_SIDE + p_curr * K_CENTER;
+
+            // Inner pixels
+            for i in 1..width.saturating_sub(1) {
+                p_prev = p_curr;
+                p_curr = p_next;
+                p_next = r1[i + 1] * r2[i + 1];
+                out[i] = (p_prev + p_next) * K_SIDE + p_curr * K_CENTER;
+            }
+
+            // Right edge: clamp right neighbor to last position
+            if width > 1 {
+                let i = width - 1;
+                p_prev = p_curr;
+                p_curr = p_next;
+                out[i] = (p_prev + p_curr) * K_SIDE + p_curr * K_CENTER;
+            }
+        }
+    }
+
+    /// Blur the element-wise product of two images: blur(src1 * src2).
+    /// Fuses the multiply into the first horizontal pass to save a full memory
+    /// pass and avoid allocating an intermediate product buffer.
+    pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [MaybeUninit<f32>]) -> Vec<f32> {
+        let width = src1.width();
+        let height = src1.height();
+        debug_assert_eq!(width, src2.width());
+        debug_assert_eq!(height, src2.height());
+        assert!(width > 0 && width < 1 << 24);
+        assert!(height > 0 && height < 1 << 24);
+
+        let pixels = width * height;
+        let tmp = unsafe { std::slice::from_raw_parts_mut(tmp.as_mut_ptr().cast::<f32>(), pixels) };
+        let mut dst = vec![0.0f32; pixels];
+
+        // First pass: fused multiply + horizontal blur
+        blur_h_mul(src1.buf(), src2.buf(), tmp, width, height, src1.stride(), src2.stride());
+        blur_v(tmp, &mut dst, width, height, width);
+        blur_h(&dst, tmp, width, height, width);
+        blur_v(tmp, &mut dst, width, height, width);
+
+        dst
     }
 }
 
