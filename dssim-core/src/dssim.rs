@@ -25,7 +25,6 @@ use crate::linear::ToRGBAPLU;
 pub use crate::tolab::ToLABBitmap;
 pub use crate::val::Dssim as Val;
 use imgref::*;
-use itertools::multizip;
 #[cfg(not(feature = "threads"))]
 use crate::lieon as rayon;
 use rayon::prelude::*;
@@ -137,19 +136,6 @@ impl DssimChan<f32> {
             i * i
         }).collect();
         blur::blur_in_place(ImgRefMut::new(&mut self.img_sq_blur[..], width, height), tmp);
-    }
-}
-
-impl Channable<LAB, f32> for [DssimChan<f32>] {
-    fn img1_img2_blur(&self, modified: &Self, tmp32: &mut [MaybeUninit<f32>]) -> Vec<LAB> {
-
-        let blurred:Vec<_> = self.iter().zip(modified.iter()).map(|(o,m)|{
-            o.img1_img2_blur(m, tmp32)
-        }).collect();
-
-        multizip((blurred[0].iter().copied(), blurred[1].iter().copied(), blurred[2].iter().copied())).map(|(l,a,b)| {
-            LAB {l,a,b}
-        }).collect()
     }
 }
 
@@ -300,13 +286,12 @@ impl Dssim {
 
             let ssim_map = match original_image_scale.chan.len() {
                 3 => {
-                    let (original_lab, (img1_img2_blur, modified_lab)) = rayon::join(
-                    || Self::lab_chan(original_image_scale),
-                    || rayon::join(
-                        || original_image_scale.chan.img1_img2_blur(&modified_image_scale.chan, tmp),
-                        || Self::lab_chan(modified_image_scale)));
-
-                    Self::compare_scale(&original_lab, &modified_lab, &img1_img2_blur)
+                    // Compute per-channel img1*img2 blur without LAB interleaving
+                    let img1_img2_blur: Vec<Vec<f32>> = original_image_scale.chan.iter()
+                        .zip(modified_image_scale.chan.iter())
+                        .map(|(o, m)| o.img1_img2_blur(m, tmp))
+                        .collect();
+                    Self::compare_scale_3ch(original_image_scale, modified_image_scale, &img1_img2_blur)
                 },
                 1 => {
                     let img1_img2_blur = original_image_scale.chan[0].img1_img2_blur(&modified_image_scale.chan[0], tmp);
@@ -345,27 +330,53 @@ impl Dssim {
         (to_dssim(ssim_sum / weight_sum).into(), ssim_maps)
     }
 
-    fn lab_chan(scale: &DssimChanScale<f32>) -> DssimChan<LAB> {
-        let l = &scale.chan[0];
-        let a = &scale.chan[1];
-        let b = &scale.chan[2];
-        assert_eq!(l.width, a.width);
-        assert_eq!(b.width, a.width);
-        DssimChan {
-            img_sq_blur: multizip((l.img_sq_blur.iter().copied(), a.img_sq_blur.iter().copied(), b.img_sq_blur.iter().copied()))
-                .map(|(l,a,b)|LAB {l,a,b}).collect(),
-            img: if let (Some(l),Some(a),Some(b)) = (&l.img, &a.img, &b.img) {
-                let buf = multizip((l.pixels(), a.pixels(), b.pixels())).map(|(l,a,b)|{
-                    debug_assert!(l.is_finite() && a.is_finite() && b.is_finite());
-                    LAB {l,a,b}
-                }).collect();
-                Some(ImgVec::new(buf, l.width(), l.height()))
-            } else {None},
-            mu: multizip((l.mu.iter().copied(), a.mu.iter().copied(), b.mu.iter().copied())).map(|(l,a,b)|LAB {l,a,b}).collect(),
-            is_chroma: false,
-            width: l.width,
-            height: l.height,
-        }
+    /// Specialized 3-channel comparison that reads L, A, B channels directly
+    /// without interleaving into LAB structs. Eliminates temporary allocations.
+    #[inline(never)]
+    fn compare_scale_3ch(original: &DssimChanScale<f32>, modified: &DssimChanScale<f32>, img1_img2_blur: &[Vec<f32>]) -> ImgVec<f32> {
+        let width = original.chan[0].width;
+        let height = original.chan[0].height;
+
+        let c1 = 0.01 * 0.01;
+        let c2 = 0.03 * 0.03;
+        let inv3 = 1.0 / 3.0;
+
+        let pixels = width * height;
+        let map_out: Vec<f32> = (0..pixels).into_par_iter().with_min_len(1 << 10).map(|i| {
+            let mut mu1_sq = 0.0f32;
+            let mut mu2_sq = 0.0f32;
+            let mut mu1_mu2 = 0.0f32;
+            let mut sigma1_sq = 0.0f32;
+            let mut sigma2_sq = 0.0f32;
+            let mut sigma12 = 0.0f32;
+
+            for ((o, m), i12_blur) in original.chan.iter().zip(&modified.chan).zip(img1_img2_blur) {
+                let mu1 = o.mu[i];
+                let mu2 = m.mu[i];
+                let mu1mu1 = mu1 * mu1;
+                let mu2mu2 = mu2 * mu2;
+                let mu1mu2 = mu1 * mu2;
+
+                mu1_sq += mu1mu1;
+                mu2_sq += mu2mu2;
+                mu1_mu2 += mu1mu2;
+                sigma1_sq += o.img_sq_blur[i] - mu1mu1;
+                sigma2_sq += m.img_sq_blur[i] - mu2mu2;
+                sigma12 += i12_blur[i] - mu1mu2;
+            }
+
+            let mu1_sq = mu1_sq * inv3;
+            let mu2_sq = mu2_sq * inv3;
+            let mu1_mu2 = mu1_mu2 * inv3;
+            let sigma1_sq = sigma1_sq * inv3;
+            let sigma2_sq = sigma2_sq * inv3;
+            let sigma12 = sigma12 * inv3;
+
+            (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2) /
+                ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+        }).collect();
+
+        ImgVec::new(map_out, width, height)
     }
 
     #[inline(never)]

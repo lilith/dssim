@@ -92,7 +92,7 @@ mod portable {
     // The original 2D kernel K[r][c] ≈ K1D[r] * K1D[c] (exact to f32 precision).
     // Symmetric: K1D[0] = K1D[2] = K_SIDE, K1D[1] = K_CENTER.
     const K_SIDE: f32 = 0.308_758_86;
-    const K_CENTER: f32 = 0.382_482_79;
+    const K_CENTER: f32 = 0.382_482_8;
 
     /// Horizontal 1D blur. Reads rows with `src_stride`, writes packed rows (stride = width).
     #[inline(never)]
