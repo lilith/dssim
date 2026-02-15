@@ -1,9 +1,6 @@
-
 #[cfg(any(test, all(target_os = "macos", not(feature = "no-macos-vimage"))))]
 const KERNEL: [f32; 9] = [
-    0.095332, 0.118095, 0.095332,
-    0.118095, 0.146293, 0.118095,
-    0.095332, 0.118095, 0.095332,
+    0.095332, 0.118095, 0.095332, 0.118095, 0.146293, 0.118095, 0.095332, 0.118095, 0.095332,
 ];
 
 #[cfg(all(target_os = "macos", not(feature = "no-macos-vimage")))]
@@ -59,12 +56,22 @@ mod mac {
     pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [f32]) -> Vec<f32> {
         let width = src1.width();
         let height = src1.height();
-        let mut product: Vec<f32> = src1.pixels().zip(src2.pixels()).map(|(a, b)| a * b).collect();
+        let mut product: Vec<f32> = src1
+            .pixels()
+            .zip(src2.pixels())
+            .map(|(a, b)| a * b)
+            .collect();
         blur_in_place(ImgRefMut::new(&mut product, width, height), tmp);
         product
     }
 
-    fn do_blur(srcbuf: &vImage_Buffer<*const f32>, tmp: &mut [f32], dstbuf: &mut vImage_Buffer<*mut f32>, width: usize, height: usize) {
+    fn do_blur(
+        srcbuf: &vImage_Buffer<*const f32>,
+        tmp: &mut [f32],
+        dstbuf: &mut vImage_Buffer<*mut f32>,
+        width: usize,
+        height: usize,
+    ) {
         assert_eq!(tmp.len(), width * height);
 
         unsafe {
@@ -74,7 +81,18 @@ mod mac {
                 rowBytes: width * std::mem::size_of::<f32>(),
                 data: tmp.as_mut_ptr(),
             };
-            let res = vImageConvolve_PlanarF(srcbuf, &mut tmpwrbuf, std::ptr::null_mut(), 0, 0, KERNEL.as_ptr(), 3, 3, 0., kvImageEdgeExtend);
+            let res = vImageConvolve_PlanarF(
+                srcbuf,
+                &mut tmpwrbuf,
+                std::ptr::null_mut(),
+                0,
+                0,
+                KERNEL.as_ptr(),
+                3,
+                3,
+                0.,
+                kvImageEdgeExtend,
+            );
             assert_eq!(0, res);
 
             let tmprbuf = vImage_Buffer {
@@ -83,7 +101,18 @@ mod mac {
                 rowBytes: width * std::mem::size_of::<f32>(),
                 data: tmp.as_ptr(),
             };
-            let res = vImageConvolve_PlanarF(&tmprbuf, dstbuf, std::ptr::null_mut(), 0, 0, KERNEL.as_ptr(), 3, 3, 0., kvImageEdgeExtend);
+            let res = vImageConvolve_PlanarF(
+                &tmprbuf,
+                dstbuf,
+                std::ptr::null_mut(),
+                0,
+                0,
+                KERNEL.as_ptr(),
+                3,
+                3,
+                0.,
+                kvImageEdgeExtend,
+            );
             assert_eq!(0, res);
         }
     }
@@ -133,7 +162,11 @@ mod portable {
         for y in 0..height {
             prev = curr;
             curr = next;
-            next = if y + 1 < height { &src[(y + 1) * width..][..width] } else { curr };
+            next = if y + 1 < height {
+                &src[(y + 1) * width..][..width]
+            } else {
+                curr
+            };
 
             let out = &mut dst[y * dst_stride..][..width];
             for x in 0..width {
@@ -184,7 +217,15 @@ mod portable {
     /// Computes blur(src1 * src2) by integrating the multiply into the first H pass,
     /// avoiding the need to allocate and fill an intermediate product buffer.
     #[inline(never)]
-    fn blur_h_mul(src1: &[f32], src2: &[f32], dst: &mut [f32], width: usize, height: usize, stride1: usize, stride2: usize) {
+    fn blur_h_mul(
+        src1: &[f32],
+        src2: &[f32],
+        dst: &mut [f32],
+        width: usize,
+        height: usize,
+        stride1: usize,
+        stride2: usize,
+    ) {
         for y in 0..height {
             let r1 = &src1[y * stride1..][..width];
             let r2 = &src2[y * stride2..][..width];
@@ -233,7 +274,15 @@ mod portable {
         let mut dst = vec![0.0f32; pixels];
 
         // First pass: fused multiply + horizontal blur
-        blur_h_mul(src1.buf(), src2.buf(), tmp, width, height, src1.stride(), src2.stride());
+        blur_h_mul(
+            src1.buf(),
+            src2.buf(),
+            tmp,
+            width,
+            height,
+            src1.stride(),
+            src2.stride(),
+        );
         blur_v(tmp, &mut dst, width, height, width);
         blur_h(&dst, tmp, width, height, width);
         blur_v(tmp, &mut dst, width, height, width);
@@ -257,7 +306,7 @@ fn blur_zero() {
     let mut src2 = src.clone();
 
     let mut tmp = vec![0.; 1];
-    let dst = blur(ImgRef::new(&src[..], 1,1), &mut tmp);
+    let dst = blur(ImgRef::new(&src[..], 1, 1), &mut tmp);
     blur_in_place(ImgRefMut::new(&mut src2[..], 1, 1), &mut tmp);
 
     assert_eq!(&src2, dst.buf());
@@ -266,40 +315,43 @@ fn blur_zero() {
 
 #[test]
 fn blur_one() {
-    blur_one_compare(Img::new(vec![
-        0.,0.,0.,0.,0.,
-        0.,0.,0.,0.,0.,
-        0.,0.,1.,0.,0.,
-        0.,0.,0.,0.,0.,
-        0.,0.,0.,0.,0.,
-    ], 5, 5));
+    blur_one_compare(Img::new(
+        vec![
+            0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 0., 1., 0., 0., 0., 0., 0., 0., 0., 0., 0.,
+            0., 0., 0.,
+        ],
+        5,
+        5,
+    ));
 }
 
 #[test]
 fn blur_one_stride() {
-    let nan = 1./0.;
-    blur_one_compare(Img::new_stride(vec![
-        0.,0.,0.,0.,0., nan, -11.,
-        0.,0.,0.,0.,0., 333., nan,
-        0.,0.,1.,0.,0., nan, -11.,
-        0.,0.,0.,0.,0., 333., nan,
-        0.,0.,0.,0.,0., nan,
-    ], 5, 5, 7));
+    let nan = 1. / 0.;
+    blur_one_compare(Img::new_stride(
+        vec![
+            0., 0., 0., 0., 0., nan, -11., 0., 0., 0., 0., 0., 333., nan, 0., 0., 1., 0., 0., nan,
+            -11., 0., 0., 0., 0., 0., 333., nan, 0., 0., 0., 0., 0., nan,
+        ],
+        5,
+        5,
+        7,
+    ));
 }
 
 #[cfg(test)]
 fn blur_one_compare(src: ImgVec<f32>) {
     let mut src2 = src.clone();
 
-    let mut tmp = vec![0.; 5*5];
+    let mut tmp = vec![0.; 5 * 5];
     let dst = blur(src.as_ref(), &mut tmp);
     blur_in_place(src2.as_mut(), &mut tmp);
 
     assert_eq!(&src2.pixels().collect::<Vec<_>>(), dst.buf());
 
-    assert!((1./110. - dst.buf()[0]).abs() < 0.0001, "{dst:?}");
-    assert!((1./110. - dst.buf()[5*5-1]).abs() < 0.0001, "{dst:?}");
-    assert!((0.11354011 - dst.buf()[2*5+2]).abs() < 0.0001);
+    assert!((1. / 110. - dst.buf()[0]).abs() < 0.0001, "{dst:?}");
+    assert!((1. / 110. - dst.buf()[5 * 5 - 1]).abs() < 0.0001, "{dst:?}");
+    assert!((0.11354011 - dst.buf()[2 * 5 + 2]).abs() < 0.0001);
 }
 
 #[test]
@@ -308,8 +360,8 @@ fn blur_1x1() {
     let mut src2 = src.clone();
 
     let mut tmp = vec![0.; 1];
-    let dst = blur(ImgRef::new(&src[..], 1,1), &mut tmp);
-    blur_in_place(ImgRefMut::new(&mut src2[..], 1,1), &mut tmp);
+    let dst = blur(ImgRef::new(&src[..], 1, 1), &mut tmp);
+    blur_in_place(ImgRefMut::new(&mut src2[..], 1, 1), &mut tmp);
 
     assert!((dst.buf()[0] - 1.).abs() < 0.00001);
     assert!((src2[0] - 1.).abs() < 0.00001);
@@ -318,38 +370,73 @@ fn blur_1x1() {
 #[test]
 fn blur_two() {
     let src = vec![
-    0.,1.,1.,1.,
-    1.,1.,1.,1.,
-    1.,1.,1.,1.,
-    1.,1.,1.,1.,
+        0., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1., 1.,
     ];
     let mut src2 = src.clone();
 
-    let mut tmp = vec![0.; 4*4];
-    let dst = blur(ImgRef::new(&src[..], 4,4), &mut tmp);
-    blur_in_place(ImgRefMut::new(&mut src2[..], 4,4), &mut tmp);
+    let mut tmp = vec![0.; 4 * 4];
+    let dst = blur(ImgRef::new(&src[..], 4, 4), &mut tmp);
+    blur_in_place(ImgRefMut::new(&mut src2[..], 4, 4), &mut tmp);
 
     assert_eq!(&src2, dst.buf());
 
-    let z00 = 0.*KERNEL[0] + 0.*KERNEL[1] + 1.*KERNEL[2] +
-              0.*KERNEL[3] + 0.*KERNEL[4] + 1.*KERNEL[5] +
-              1.*KERNEL[6] + 1.*KERNEL[7] + 1.*KERNEL[8];
-    let z01 =                                   0.*KERNEL[0] + 1.*KERNEL[1] + 1.*KERNEL[2] +
-                                                0.*KERNEL[3] + 1.*KERNEL[4] + 1.*KERNEL[5] +
-                                                1.*KERNEL[6] + 1.*KERNEL[7] + 1.*KERNEL[8];
+    let z00 = 0. * KERNEL[0]
+        + 0. * KERNEL[1]
+        + 1. * KERNEL[2]
+        + 0. * KERNEL[3]
+        + 0. * KERNEL[4]
+        + 1. * KERNEL[5]
+        + 1. * KERNEL[6]
+        + 1. * KERNEL[7]
+        + 1. * KERNEL[8];
+    let z01 = 0. * KERNEL[0]
+        + 1. * KERNEL[1]
+        + 1. * KERNEL[2]
+        + 0. * KERNEL[3]
+        + 1. * KERNEL[4]
+        + 1. * KERNEL[5]
+        + 1. * KERNEL[6]
+        + 1. * KERNEL[7]
+        + 1. * KERNEL[8];
 
-    let z10 = 0.*KERNEL[0] + 0.*KERNEL[1] + 1.*KERNEL[2] +
-              1.*KERNEL[3] + 1.*KERNEL[4] + 1.*KERNEL[5] +
-              1.*KERNEL[6] + 1.*KERNEL[7] + 1.*KERNEL[8];
-    let z11 =                                   0.*KERNEL[0] + 1.*KERNEL[1] + 1.*KERNEL[2] +
-                                                1.*KERNEL[3] + 1.*KERNEL[4] + 1.*KERNEL[5] +
-                                                1.*KERNEL[6] + 1.*KERNEL[7] + 1.*KERNEL[8];
-    let exp = z00*KERNEL[0] + z00*KERNEL[1] + z01*KERNEL[2] +
-              z00*KERNEL[3] + z00*KERNEL[4] + z01*KERNEL[5] +
-              z10*KERNEL[6] + z10*KERNEL[7] + z11*KERNEL[8];
+    let z10 = 0. * KERNEL[0]
+        + 0. * KERNEL[1]
+        + 1. * KERNEL[2]
+        + 1. * KERNEL[3]
+        + 1. * KERNEL[4]
+        + 1. * KERNEL[5]
+        + 1. * KERNEL[6]
+        + 1. * KERNEL[7]
+        + 1. * KERNEL[8];
+    let z11 = 0. * KERNEL[0]
+        + 1. * KERNEL[1]
+        + 1. * KERNEL[2]
+        + 1. * KERNEL[3]
+        + 1. * KERNEL[4]
+        + 1. * KERNEL[5]
+        + 1. * KERNEL[6]
+        + 1. * KERNEL[7]
+        + 1. * KERNEL[8];
+    let exp = z00 * KERNEL[0]
+        + z00 * KERNEL[1]
+        + z01 * KERNEL[2]
+        + z00 * KERNEL[3]
+        + z00 * KERNEL[4]
+        + z01 * KERNEL[5]
+        + z10 * KERNEL[6]
+        + z10 * KERNEL[7]
+        + z11 * KERNEL[8];
 
     assert!((1. - dst.buf()[3]).abs() < 0.0001, "{}", dst.buf()[3]);
-    assert!((1. - dst.buf()[3 * 4]).abs() < 0.0001, "{}", dst.buf()[3 * 4]);
-    assert!((1. - dst.buf()[4 * 4 - 1]).abs() < 0.0001, "{}", dst.buf()[4 * 4 - 1]);
+    assert!(
+        (1. - dst.buf()[3 * 4]).abs() < 0.0001,
+        "{}",
+        dst.buf()[3 * 4]
+    );
+    assert!(
+        (1. - dst.buf()[4 * 4 - 1]).abs() < 0.0001,
+        "{}",
+        dst.buf()[4 * 4 - 1]
+    );
     assert!((f64::from(exp) - f64::from(dst.buf()[0])).abs() < 0.0001);
 }
