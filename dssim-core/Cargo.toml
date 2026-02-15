@@ -19,7 +19,7 @@ crate-type = ["lib", "staticlib"]
 [dependencies]
 imgref = "1.11.0"
 itertools = "0.14"
-multiversion = { version = "0.8", optional = true, default-features = false }
+multiversion = { version = "0.8", optional = true }
 rayon = { version = "1.11.0", optional = true }
 rgb = "0.8.52"
 

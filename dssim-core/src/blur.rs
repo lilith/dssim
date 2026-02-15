@@ -196,7 +196,7 @@ mod portable {
         feature = "fma",
         multiversion::multiversion(targets("x86_64+avx2+fma"))
     )]
-    pub fn blur(src: ImgRef<'_, f32>, tmp: &mut [f32]) -> ImgVec<f32> {
+    pub fn blur<'s>(src: ImgRef<'s, f32>, tmp: &mut [f32]) -> ImgVec<f32> {
         let width = src.width();
         let height = src.height();
         assert!(width > 0 && width < 1 << 24);
@@ -221,7 +221,7 @@ mod portable {
         feature = "fma",
         multiversion::multiversion(targets("x86_64+avx2+fma"))
     )]
-    pub fn blur_in_place(mut srcdst: ImgRefMut<'_, f32>, tmp: &mut [f32]) {
+    pub fn blur_in_place<'s>(mut srcdst: ImgRefMut<'s, f32>, tmp: &mut [f32]) {
         let width = srcdst.width();
         let height = srcdst.height();
         let stride = srcdst.stride();
@@ -290,7 +290,11 @@ mod portable {
         feature = "fma",
         multiversion::multiversion(targets("x86_64+avx2+fma"))
     )]
-    pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [f32]) -> Vec<f32> {
+    pub fn blur_mul<'a, 'b>(
+        src1: ImgRef<'a, f32>,
+        src2: ImgRef<'b, f32>,
+        tmp: &mut [f32],
+    ) -> Vec<f32> {
         let width = src1.width();
         let height = src1.height();
         debug_assert_eq!(width, src2.width());
