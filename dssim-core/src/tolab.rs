@@ -20,7 +20,7 @@ pub(crate) trait ToLAB {
 
 #[inline(always)]
 fn fma_matrix(r: f32, rx: f32, g: f32, gx: f32, b: f32, bx: f32) -> f32 {
-    b.mul_add(bx, g.mul_add(gx, r * rx))
+    r * rx + g * gx + b * bx
 }
 
 const EPSILON: f32 = 216. / 24389.;
@@ -38,8 +38,8 @@ impl ToLAB for RGBLU {
 
         let lab = (
             (Y * 1.05f32), // 1.05 instead of 1.16 to boost color importance without pushing colors outside of 1.0 range
-            (500.0 / 220.0f32).mul_add(X - Y, 86.2 / 220.0f32), /* 86 is a fudge to make the value positive */
-            (200.0 / 220.0f32).mul_add(Y - Z, 107.9 / 220.0f32), /* 107 is a fudge to make the value positive */
+            (500.0 / 220.0) * (X - Y) + (86.2 / 220.0), /* 86 is a fudge to make the value positive */
+            (200.0 / 220.0) * (Y - Z) + (107.9 / 220.0), /* 107 is a fudge to make the value positive */
         );
         debug_assert!(lab.0 <= 1.0 && lab.1 <= 1.0 && lab.2 <= 1.0);
         lab

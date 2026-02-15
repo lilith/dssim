@@ -402,7 +402,7 @@ impl Dssim {
             let sigma2_sq: f32 = (img2_sq_blur - mu2mu2).into();
             let sigma12: f32 = (img1_img2_blur - mu1mu2).into();
 
-            2.0f32.mul_add(mu1_mu2, c1) * 2.0f32.mul_add(sigma12, c2) /
+            (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2) /
                        ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
         }).collect();
 
