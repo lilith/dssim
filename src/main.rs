@@ -145,11 +145,24 @@ fn write_ssim_maps(ssim_maps: Vec<dssim_core::SsimMap>, map_output_file: &str) -
                 a: 255,
             }
         }).collect();
-        lodepng::encode32_file(format!("{map_output_file}-{n}.png"), &out, map_meta.map.width(), map_meta.map.height())
+        write_png_rgba(&format!("{map_output_file}-{n}.png"), &out, map_meta.map.width(), map_meta.map.height())
             .map_err(|e| {
                 format!("Can't write {map_output_file}: {e}")
             })
     })?;
+    Ok(())
+}
+
+fn write_png_rgba(path: &str, data: &[rgb::RGBA8], width: usize, height: usize) -> Result<(), Box<dyn std::error::Error>> {
+    use rgb::ComponentBytes;
+
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut encoder = png::Encoder::new(file, width as u32, height as u32);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header()?;
+    writer.write_image_data(data.as_bytes())?;
+    writer.finish()?;
     Ok(())
 }
 
