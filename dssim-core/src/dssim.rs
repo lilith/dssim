@@ -131,11 +131,7 @@ impl DssimChan<f32> {
         let (mu, _, _) = blur::blur(img.as_ref(), tmp).into_contiguous_buf();
         self.mu = mu;
 
-        self.img_sq_blur = img.pixels().map(|i| {
-            debug_assert!(i <= 1.0 && i >= 0.0);
-            i * i
-        }).collect();
-        blur::blur_in_place(ImgRefMut::new(&mut self.img_sq_blur[..], width, height), tmp);
+        self.img_sq_blur = blur::blur_mul(img.as_ref(), img.as_ref(), tmp);
     }
 }
 
