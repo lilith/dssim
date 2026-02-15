@@ -128,24 +128,8 @@ mod portable {
     const K_SIDE: f32 = 0.308_758_86;
     const K_CENTER: f32 = 0.382_482_8;
 
-    /// Apply the 1D kernel: sides * K_SIDE + center * K_CENTER.
-    /// With `fma` feature, uses `mul_add` (hardware FMA when inlined into an AVX2+FMA clone).
-    /// Without `fma` feature, uses plain multiply-add.
-    #[inline(always)]
-    fn kern(sides: f32, center: f32) -> f32 {
-        #[cfg(feature = "fma")]
-        {
-            sides.mul_add(K_SIDE, center * K_CENTER)
-        }
-        #[cfg(not(feature = "fma"))]
-        {
-            sides * K_SIDE + center * K_CENTER
-        }
-    }
-
     /// Horizontal 1D blur. Reads rows with `src_stride`, writes packed rows (stride = width).
-    #[cfg_attr(feature = "fma", inline(always))]
-    #[cfg_attr(not(feature = "fma"), inline(never))]
+    #[inline(never)]
     fn blur_h(src: &[f32], dst: &mut [f32], width: usize, height: usize, src_stride: usize) {
         for y in 0..height {
             let row = &src[y * src_stride..][..width];
@@ -153,24 +137,23 @@ mod portable {
 
             // Left edge: clamp left neighbor to position 0
             let right = if width > 1 { row[1] } else { row[0] };
-            out[0] = kern(row[0] + right, row[0]);
+            out[0] = (row[0] + right) * K_SIDE + row[0] * K_CENTER;
 
             // Inner pixels
             for i in 1..width.saturating_sub(1) {
-                out[i] = kern(row[i - 1] + row[i + 1], row[i]);
+                out[i] = (row[i - 1] + row[i + 1]) * K_SIDE + row[i] * K_CENTER;
             }
 
             // Right edge: clamp right neighbor to last position
             if width > 1 {
                 let i = width - 1;
-                out[i] = kern(row[i - 1] + row[i], row[i]);
+                out[i] = (row[i - 1] + row[i]) * K_SIDE + row[i] * K_CENTER;
             }
         }
     }
 
     /// Vertical 1D blur. Reads packed rows (stride = width), writes rows with `dst_stride`.
-    #[cfg_attr(feature = "fma", inline(always))]
-    #[cfg_attr(not(feature = "fma"), inline(never))]
+    #[inline(never)]
     fn blur_v(src: &[f32], dst: &mut [f32], width: usize, height: usize, dst_stride: usize) {
         let mut prev = &src[0..width];
         let mut curr = prev;
@@ -187,62 +170,14 @@ mod portable {
 
             let out = &mut dst[y * dst_stride..][..width];
             for x in 0..width {
-                out[x] = kern(prev[x] + next[x], curr[x]);
+                out[x] = (prev[x] + next[x]) * K_SIDE + curr[x] * K_CENTER;
             }
         }
     }
 
-    #[cfg_attr(
-        feature = "fma",
-        multiversion::multiversion(targets("x86_64+avx2+fma"))
-    )]
-    pub fn blur<'s>(src: ImgRef<'s, f32>, tmp: &mut [f32]) -> ImgVec<f32> {
-        let width = src.width();
-        let height = src.height();
-        assert!(width > 0 && width < 1 << 24);
-        assert!(height > 0 && height < 1 << 24);
-        debug_assert!(src.pixels().all(|p| p.is_finite()));
-
-        let pixels = width * height;
-        assert!(tmp.len() >= pixels);
-        let tmp = &mut tmp[..pixels];
-        let mut dst = vec![0.0f32; pixels];
-
-        // Two applications of the blur, each decomposed into horizontal then vertical
-        blur_h(src.buf(), tmp, width, height, src.stride());
-        blur_v(tmp, &mut dst, width, height, width);
-        blur_h(&dst, tmp, width, height, width);
-        blur_v(tmp, &mut dst, width, height, width);
-
-        ImgVec::new(dst, width, height)
-    }
-
-    #[cfg_attr(
-        feature = "fma",
-        multiversion::multiversion(targets("x86_64+avx2+fma"))
-    )]
-    pub fn blur_in_place<'s>(mut srcdst: ImgRefMut<'s, f32>, tmp: &mut [f32]) {
-        let width = srcdst.width();
-        let height = srcdst.height();
-        let stride = srcdst.stride();
-        let pixels = width * height;
-
-        assert!(tmp.len() >= pixels);
-        let tmp = &mut tmp[..pixels];
-        let buf = srcdst.buf_mut();
-
-        // Two applications of the blur, each decomposed into horizontal then vertical
-        blur_h(buf, tmp, width, height, stride);
-        blur_v(tmp, buf, width, height, stride);
-        blur_h(buf, tmp, width, height, stride);
-        blur_v(tmp, buf, width, height, stride);
-    }
-
     /// Horizontal blur with fused element-wise multiply.
-    /// Computes blur(src1 * src2) by integrating the multiply into the first H pass,
-    /// avoiding the need to allocate and fill an intermediate product buffer.
-    #[cfg_attr(feature = "fma", inline(always))]
-    #[cfg_attr(not(feature = "fma"), inline(never))]
+    /// Computes blur(src1 * src2) by integrating the multiply into the first H pass.
+    #[inline(never)]
     fn blur_h_mul(
         src1: &[f32],
         src2: &[f32],
@@ -263,14 +198,14 @@ mod portable {
             let mut p_next = if width > 1 { r1[1] * r2[1] } else { p_curr };
 
             // Left edge: clamp left neighbor to position 0
-            out[0] = kern(p_curr + p_next, p_curr);
+            out[0] = (p_curr + p_next) * K_SIDE + p_curr * K_CENTER;
 
             // Inner pixels
             for i in 1..width.saturating_sub(1) {
                 p_prev = p_curr;
                 p_curr = p_next;
                 p_next = r1[i + 1] * r2[i + 1];
-                out[i] = kern(p_prev + p_next, p_curr);
+                out[i] = (p_prev + p_next) * K_SIDE + p_curr * K_CENTER;
             }
 
             // Right edge: clamp right neighbor to last position
@@ -278,23 +213,283 @@ mod portable {
                 let i = width - 1;
                 p_prev = p_curr;
                 p_curr = p_next;
-                out[i] = kern(p_prev + p_curr, p_curr);
+                out[i] = (p_prev + p_curr) * K_SIDE + p_curr * K_CENTER;
             }
         }
+    }
+
+    // ── AVX2+FMA SIMD path ──────────────────────────────────────────────
+    #[cfg(all(feature = "fma", target_arch = "x86_64"))]
+    mod simd {
+        use super::{K_CENTER, K_SIDE};
+        use archmage::prelude::*;
+        use magetypes::simd::f32x8;
+
+        #[arcane]
+        pub fn blur_avx2(
+            t: Desktop64,
+            buf: &[f32],
+            tmp: &mut [f32],
+            dst: &mut [f32],
+            w: usize,
+            h: usize,
+            stride: usize,
+        ) {
+            blur_h_simd(t, buf, tmp, w, h, stride);
+            blur_v_simd(t, tmp, dst, w, h, w);
+            blur_h_simd(t, dst, tmp, w, h, w);
+            blur_v_simd(t, tmp, dst, w, h, w);
+        }
+
+        #[arcane]
+        pub fn blur_in_place_avx2(
+            t: Desktop64,
+            buf: &mut [f32],
+            tmp: &mut [f32],
+            w: usize,
+            h: usize,
+            stride: usize,
+        ) {
+            blur_h_simd(t, buf, tmp, w, h, stride);
+            blur_v_simd(t, tmp, buf, w, h, stride);
+            blur_h_simd(t, buf, tmp, w, h, stride);
+            blur_v_simd(t, tmp, buf, w, h, stride);
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        #[arcane]
+        pub fn blur_mul_avx2(
+            t: Desktop64,
+            src1: &[f32],
+            src2: &[f32],
+            tmp: &mut [f32],
+            dst: &mut [f32],
+            w: usize,
+            h: usize,
+            stride1: usize,
+            stride2: usize,
+        ) {
+            blur_h_mul_simd(t, src1, src2, tmp, w, h, stride1, stride2);
+            blur_v_simd(t, tmp, dst, w, h, w);
+            blur_h_simd(t, dst, tmp, w, h, w);
+            blur_v_simd(t, tmp, dst, w, h, w);
+        }
+
+        #[rite]
+        fn blur_h_simd(
+            t: Desktop64,
+            src: &[f32],
+            dst: &mut [f32],
+            width: usize,
+            height: usize,
+            src_stride: usize,
+        ) {
+            let vk_side = f32x8::splat(t, K_SIDE);
+            let vk_center = f32x8::splat(t, K_CENTER);
+
+            for y in 0..height {
+                let row = &src[y * src_stride..][..width];
+                let out = &mut dst[y * width..][..width];
+
+                // Left edge: scalar (1px)
+                let right = if width > 1 { row[1] } else { row[0] };
+                out[0] = (row[0] + right) * K_SIDE + row[0] * K_CENTER;
+
+                // SIMD loop: process 8 pixels at a time
+                // Needs row[i-1..i+7], row[i..i+8], row[i+1..i+9] all valid
+                let mut i = 1;
+                while i + 9 <= width {
+                    let left = f32x8::load(t, (&row[i - 1..i + 7]).try_into().unwrap());
+                    let center = f32x8::load(t, (&row[i..i + 8]).try_into().unwrap());
+                    let right = f32x8::load(t, (&row[i + 1..i + 9]).try_into().unwrap());
+                    let sides = left + right;
+                    let result = sides.mul_add(vk_side, center * vk_center);
+                    result.store((&mut out[i..i + 8]).try_into().unwrap());
+                    i += 8;
+                }
+
+                // Scalar tail
+                while i < width.saturating_sub(1) {
+                    out[i] = (row[i - 1] + row[i + 1]) * K_SIDE + row[i] * K_CENTER;
+                    i += 1;
+                }
+
+                // Right edge
+                if width > 1 {
+                    let last = width - 1;
+                    out[last] = (row[last - 1] + row[last]) * K_SIDE + row[last] * K_CENTER;
+                }
+            }
+        }
+
+        #[rite]
+        fn blur_v_simd(
+            t: Desktop64,
+            src: &[f32],
+            dst: &mut [f32],
+            width: usize,
+            height: usize,
+            dst_stride: usize,
+        ) {
+            let vk_side = f32x8::splat(t, K_SIDE);
+            let vk_center = f32x8::splat(t, K_CENTER);
+
+            for y in 0..height {
+                let prev = if y > 0 {
+                    &src[(y - 1) * width..][..width]
+                } else {
+                    &src[0..width]
+                };
+                let curr = &src[y * width..][..width];
+                let next = if y + 1 < height {
+                    &src[(y + 1) * width..][..width]
+                } else {
+                    curr
+                };
+
+                let out = &mut dst[y * dst_stride..][..width];
+
+                let mut x = 0;
+                while x + 8 <= width {
+                    let vprev = f32x8::load(t, (&prev[x..x + 8]).try_into().unwrap());
+                    let vcurr = f32x8::load(t, (&curr[x..x + 8]).try_into().unwrap());
+                    let vnext = f32x8::load(t, (&next[x..x + 8]).try_into().unwrap());
+                    let sides = vprev + vnext;
+                    let result = sides.mul_add(vk_side, vcurr * vk_center);
+                    result.store((&mut out[x..x + 8]).try_into().unwrap());
+                    x += 8;
+                }
+
+                // Scalar tail
+                while x < width {
+                    out[x] = (prev[x] + next[x]) * K_SIDE + curr[x] * K_CENTER;
+                    x += 1;
+                }
+            }
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        #[rite]
+        fn blur_h_mul_simd(
+            t: Desktop64,
+            src1: &[f32],
+            src2: &[f32],
+            dst: &mut [f32],
+            width: usize,
+            height: usize,
+            stride1: usize,
+            stride2: usize,
+        ) {
+            let vk_side = f32x8::splat(t, K_SIDE);
+            let vk_center = f32x8::splat(t, K_CENTER);
+
+            for y in 0..height {
+                let r1 = &src1[y * stride1..][..width];
+                let r2 = &src2[y * stride2..][..width];
+                let out = &mut dst[y * width..][..width];
+
+                // Left edge: scalar
+                let p_curr = r1[0] * r2[0];
+                let p_right = if width > 1 { r1[1] * r2[1] } else { p_curr };
+                out[0] = (p_curr + p_right) * K_SIDE + p_curr * K_CENTER;
+
+                // SIMD loop: 6 loads per 8px (3 pairs from src1, src2)
+                let mut i = 1;
+                while i + 9 <= width {
+                    let l1 = f32x8::load(t, (&r1[i - 1..i + 7]).try_into().unwrap());
+                    let l2 = f32x8::load(t, (&r2[i - 1..i + 7]).try_into().unwrap());
+                    let c1 = f32x8::load(t, (&r1[i..i + 8]).try_into().unwrap());
+                    let c2 = f32x8::load(t, (&r2[i..i + 8]).try_into().unwrap());
+                    let ri1 = f32x8::load(t, (&r1[i + 1..i + 9]).try_into().unwrap());
+                    let ri2 = f32x8::load(t, (&r2[i + 1..i + 9]).try_into().unwrap());
+
+                    let p_left = l1 * l2;
+                    let p_center = c1 * c2;
+                    let p_right = ri1 * ri2;
+                    let sides = p_left + p_right;
+                    let result = sides.mul_add(vk_side, p_center * vk_center);
+                    result.store((&mut out[i..i + 8]).try_into().unwrap());
+                    i += 8;
+                }
+
+                // Scalar tail
+                while i < width.saturating_sub(1) {
+                    let pl = r1[i - 1] * r2[i - 1];
+                    let pc = r1[i] * r2[i];
+                    let pr = r1[i + 1] * r2[i + 1];
+                    out[i] = (pl + pr) * K_SIDE + pc * K_CENTER;
+                    i += 1;
+                }
+
+                // Right edge
+                if width > 1 {
+                    let last = width - 1;
+                    let pl = r1[last - 1] * r2[last - 1];
+                    let pc = r1[last] * r2[last];
+                    out[last] = (pl + pc) * K_SIDE + pc * K_CENTER;
+                }
+            }
+        }
+    }
+
+    pub fn blur(src: ImgRef<'_, f32>, tmp: &mut [f32]) -> ImgVec<f32> {
+        let width = src.width();
+        let height = src.height();
+        assert!(width > 0 && width < 1 << 24);
+        assert!(height > 0 && height < 1 << 24);
+        debug_assert!(src.pixels().all(|p| p.is_finite()));
+
+        let pixels = width * height;
+        assert!(tmp.len() >= pixels);
+        let tmp = &mut tmp[..pixels];
+        let mut dst = vec![0.0f32; pixels];
+
+        #[cfg(all(feature = "fma", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken as _;
+            if let Some(token) = archmage::Desktop64::summon() {
+                simd::blur_avx2(token, src.buf(), tmp, &mut dst, width, height, src.stride());
+                return ImgVec::new(dst, width, height);
+            }
+        }
+
+        blur_h(src.buf(), tmp, width, height, src.stride());
+        blur_v(tmp, &mut dst, width, height, width);
+        blur_h(&dst, tmp, width, height, width);
+        blur_v(tmp, &mut dst, width, height, width);
+
+        ImgVec::new(dst, width, height)
+    }
+
+    pub fn blur_in_place(mut srcdst: ImgRefMut<'_, f32>, tmp: &mut [f32]) {
+        let width = srcdst.width();
+        let height = srcdst.height();
+        let stride = srcdst.stride();
+        let pixels = width * height;
+
+        assert!(tmp.len() >= pixels);
+        let tmp = &mut tmp[..pixels];
+        let buf = srcdst.buf_mut();
+
+        #[cfg(all(feature = "fma", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken as _;
+            if let Some(token) = archmage::Desktop64::summon() {
+                simd::blur_in_place_avx2(token, buf, tmp, width, height, stride);
+                return;
+            }
+        }
+
+        blur_h(buf, tmp, width, height, stride);
+        blur_v(tmp, buf, width, height, stride);
+        blur_h(buf, tmp, width, height, stride);
+        blur_v(tmp, buf, width, height, stride);
     }
 
     /// Blur the element-wise product of two images: blur(src1 * src2).
     /// Fuses the multiply into the first horizontal pass to save a full memory
     /// pass and avoid allocating an intermediate product buffer.
-    #[cfg_attr(
-        feature = "fma",
-        multiversion::multiversion(targets("x86_64+avx2+fma"))
-    )]
-    pub fn blur_mul<'a, 'b>(
-        src1: ImgRef<'a, f32>,
-        src2: ImgRef<'b, f32>,
-        tmp: &mut [f32],
-    ) -> Vec<f32> {
+    pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [f32]) -> Vec<f32> {
         let width = src1.width();
         let height = src1.height();
         debug_assert_eq!(width, src2.width());
@@ -307,7 +502,25 @@ mod portable {
         let tmp = &mut tmp[..pixels];
         let mut dst = vec![0.0f32; pixels];
 
-        // First pass: fused multiply + horizontal blur
+        #[cfg(all(feature = "fma", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken as _;
+            if let Some(token) = archmage::Desktop64::summon() {
+                simd::blur_mul_avx2(
+                    token,
+                    src1.buf(),
+                    src2.buf(),
+                    tmp,
+                    &mut dst,
+                    width,
+                    height,
+                    src1.stride(),
+                    src2.stride(),
+                );
+                return dst;
+            }
+        }
+
         blur_h_mul(
             src1.buf(),
             src2.buf(),
