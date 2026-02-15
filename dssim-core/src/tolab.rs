@@ -110,14 +110,14 @@ fn rgb_to_lab<T: Copy + Sync + Send + 'static, F>(img: ImgRef<'_, T>, cb: F) -> 
     let height = img.height();
     let area = width * height;
 
-    let mut out_l = Vec::with_capacity(area);
-    let mut out_a = Vec::with_capacity(area);
-    let mut out_b = Vec::with_capacity(area);
+    let mut out_l = vec![0f32; area];
+    let mut out_a = vec![0f32; area];
+    let mut out_b = vec![0f32; area];
 
     // For output width == stride
-    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
+    out_l.par_chunks_exact_mut(width).take(height).zip(
+        out_a.par_chunks_exact_mut(width).take(height).zip(
+            out_b.par_chunks_exact_mut(width).take(height))
     ).enumerate()
     .for_each(|(y, (l_row, (a_row, b_row)))| {
         let in_row = &img.rows().nth(y).unwrap()[0..width];
@@ -127,15 +127,11 @@ fn rgb_to_lab<T: Copy + Sync + Send + 'static, F>(img: ImgRef<'_, T>, cb: F) -> 
         for x in 0..width {
             let n = (x+11) ^ (y+11);
             let (l,a,b) = cb(in_row[x], n);
-            l_row[x].write(l);
-            a_row[x].write(a);
-            b_row[x].write(b);
+            l_row[x] = l;
+            a_row[x] = a;
+            b_row[x] = b;
         }
     });
-
-    unsafe { out_l.set_len(area) };
-    unsafe { out_a.set_len(area) };
-    unsafe { out_b.set_len(area) };
 
     vec![
         Img::new(out_l, width, height),
