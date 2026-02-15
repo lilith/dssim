@@ -39,6 +39,7 @@ webp = ["load_image/webp"]
 webp-static = ["load_image/webp-static"]
 # Decode JPEGs using libjpeg-turbo derivative (closer to the reference decoder)
 mozjpeg = ["load_image/mozjpeg"]
+fma = ["dssim-core/fma"]
 no-macos-vimage = ["dssim-core/no-macos-vimage"]
 
 [package.metadata.release]

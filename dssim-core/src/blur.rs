@@ -128,8 +128,24 @@ mod portable {
     const K_SIDE: f32 = 0.308_758_86;
     const K_CENTER: f32 = 0.382_482_8;
 
+    /// Apply the 1D kernel: sides * K_SIDE + center * K_CENTER.
+    /// With `fma` feature, uses `mul_add` (hardware FMA when inlined into an AVX2+FMA clone).
+    /// Without `fma` feature, uses plain multiply-add.
+    #[inline(always)]
+    fn kern(sides: f32, center: f32) -> f32 {
+        #[cfg(feature = "fma")]
+        {
+            sides.mul_add(K_SIDE, center * K_CENTER)
+        }
+        #[cfg(not(feature = "fma"))]
+        {
+            sides * K_SIDE + center * K_CENTER
+        }
+    }
+
     /// Horizontal 1D blur. Reads rows with `src_stride`, writes packed rows (stride = width).
-    #[inline(never)]
+    #[cfg_attr(feature = "fma", inline(always))]
+    #[cfg_attr(not(feature = "fma"), inline(never))]
     fn blur_h(src: &[f32], dst: &mut [f32], width: usize, height: usize, src_stride: usize) {
         for y in 0..height {
             let row = &src[y * src_stride..][..width];
@@ -137,23 +153,24 @@ mod portable {
 
             // Left edge: clamp left neighbor to position 0
             let right = if width > 1 { row[1] } else { row[0] };
-            out[0] = (row[0] + right) * K_SIDE + row[0] * K_CENTER;
+            out[0] = kern(row[0] + right, row[0]);
 
             // Inner pixels
             for i in 1..width.saturating_sub(1) {
-                out[i] = (row[i - 1] + row[i + 1]) * K_SIDE + row[i] * K_CENTER;
+                out[i] = kern(row[i - 1] + row[i + 1], row[i]);
             }
 
             // Right edge: clamp right neighbor to last position
             if width > 1 {
                 let i = width - 1;
-                out[i] = (row[i - 1] + row[i]) * K_SIDE + row[i] * K_CENTER;
+                out[i] = kern(row[i - 1] + row[i], row[i]);
             }
         }
     }
 
     /// Vertical 1D blur. Reads packed rows (stride = width), writes rows with `dst_stride`.
-    #[inline(never)]
+    #[cfg_attr(feature = "fma", inline(always))]
+    #[cfg_attr(not(feature = "fma"), inline(never))]
     fn blur_v(src: &[f32], dst: &mut [f32], width: usize, height: usize, dst_stride: usize) {
         let mut prev = &src[0..width];
         let mut curr = prev;
@@ -170,11 +187,15 @@ mod portable {
 
             let out = &mut dst[y * dst_stride..][..width];
             for x in 0..width {
-                out[x] = (prev[x] + next[x]) * K_SIDE + curr[x] * K_CENTER;
+                out[x] = kern(prev[x] + next[x], curr[x]);
             }
         }
     }
 
+    #[cfg_attr(
+        feature = "fma",
+        multiversion::multiversion(targets("x86_64+avx2+fma"))
+    )]
     pub fn blur(src: ImgRef<'_, f32>, tmp: &mut [f32]) -> ImgVec<f32> {
         let width = src.width();
         let height = src.height();
@@ -196,6 +217,10 @@ mod portable {
         ImgVec::new(dst, width, height)
     }
 
+    #[cfg_attr(
+        feature = "fma",
+        multiversion::multiversion(targets("x86_64+avx2+fma"))
+    )]
     pub fn blur_in_place(mut srcdst: ImgRefMut<'_, f32>, tmp: &mut [f32]) {
         let width = srcdst.width();
         let height = srcdst.height();
@@ -216,7 +241,8 @@ mod portable {
     /// Horizontal blur with fused element-wise multiply.
     /// Computes blur(src1 * src2) by integrating the multiply into the first H pass,
     /// avoiding the need to allocate and fill an intermediate product buffer.
-    #[inline(never)]
+    #[cfg_attr(feature = "fma", inline(always))]
+    #[cfg_attr(not(feature = "fma"), inline(never))]
     fn blur_h_mul(
         src1: &[f32],
         src2: &[f32],
@@ -237,14 +263,14 @@ mod portable {
             let mut p_next = if width > 1 { r1[1] * r2[1] } else { p_curr };
 
             // Left edge: clamp left neighbor to position 0
-            out[0] = (p_curr + p_next) * K_SIDE + p_curr * K_CENTER;
+            out[0] = kern(p_curr + p_next, p_curr);
 
             // Inner pixels
             for i in 1..width.saturating_sub(1) {
                 p_prev = p_curr;
                 p_curr = p_next;
                 p_next = r1[i + 1] * r2[i + 1];
-                out[i] = (p_prev + p_next) * K_SIDE + p_curr * K_CENTER;
+                out[i] = kern(p_prev + p_next, p_curr);
             }
 
             // Right edge: clamp right neighbor to last position
@@ -252,7 +278,7 @@ mod portable {
                 let i = width - 1;
                 p_prev = p_curr;
                 p_curr = p_next;
-                out[i] = (p_prev + p_curr) * K_SIDE + p_curr * K_CENTER;
+                out[i] = kern(p_prev + p_curr, p_curr);
             }
         }
     }
@@ -260,6 +286,10 @@ mod portable {
     /// Blur the element-wise product of two images: blur(src1 * src2).
     /// Fuses the multiply into the first horizontal pass to save a full memory
     /// pass and avoid allocating an intermediate product buffer.
+    #[cfg_attr(
+        feature = "fma",
+        multiversion::multiversion(targets("x86_64+avx2+fma"))
+    )]
     pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [f32]) -> Vec<f32> {
         let width = src1.width();
         let height = src1.height();
