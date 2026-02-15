@@ -30,13 +30,12 @@ use crate::lieon as rayon;
 use rayon::prelude::*;
 use rgb::{RGB, RGBA};
 use std::borrow::Borrow;
-use std::mem::MaybeUninit;
 use std::ops;
 use std::ops::Deref;
 use std::sync::Arc;
 
 trait Channable<T, I> {
-    fn img1_img2_blur(&self, modified: &Self, tmp: &mut [MaybeUninit<I>]) -> Vec<T>;
+    fn img1_img2_blur(&self, modified: &Self, tmp: &mut [I]) -> Vec<T>;
 }
 
 #[derive(Clone)]
@@ -115,7 +114,7 @@ impl DssimChan<f32> {
 }
 
 impl DssimChan<f32> {
-    fn preprocess(&mut self, tmp: &mut [MaybeUninit<f32>]) {
+    fn preprocess(&mut self, tmp: &mut [f32]) {
         let width = self.width;
         let height = self.height;
         assert!(width > 0);
@@ -136,7 +135,7 @@ impl DssimChan<f32> {
 }
 
 impl Channable<f32, f32> for DssimChan<f32> {
-    fn img1_img2_blur(&self, modified: &Self, tmp32: &mut [MaybeUninit<f32>]) -> Vec<f32> {
+    fn img1_img2_blur(&self, modified: &Self, tmp32: &mut [f32]) -> Vec<f32> {
         let src = self.img.as_ref().unwrap();
         let modified_img = modified.img.as_ref().unwrap();
         blur::blur_mul(src.as_ref(), modified_img.as_ref(), tmp32)
@@ -229,8 +228,8 @@ impl Dssim {
                         let mut ch = DssimChan::new(l, n > 0);
 
                         let pixels = w * h;
-                        let mut tmp = Vec::with_capacity(pixels);
-                        ch.preprocess(&mut tmp.spare_capacity_mut()[..pixels]);
+                        let mut tmp = vec![0f32; pixels];
+                        ch.preprocess(&mut tmp);
                         ch
                     }).collect(),
                 }
@@ -267,20 +266,19 @@ impl Dssim {
         let res: Vec<_> = combined_iter.par_bridge().map(|(n, (weight, (modified_image_scale, original_image_scale)))| {
             let scale_width = original_image_scale.chan[0].width;
             let scale_height = original_image_scale.chan[0].height;
-            let mut tmp = Vec::with_capacity(scale_width * scale_height);
-            let tmp = &mut tmp.spare_capacity_mut()[0 .. scale_width*scale_height];
+            let mut tmp = vec![0f32; scale_width * scale_height];
 
             let ssim_map = match original_image_scale.chan.len() {
                 3 => {
                     // Compute per-channel img1*img2 blur without LAB interleaving
                     let img1_img2_blur: Vec<Vec<f32>> = original_image_scale.chan.iter()
                         .zip(modified_image_scale.chan.iter())
-                        .map(|(o, m)| o.img1_img2_blur(m, tmp))
+                        .map(|(o, m)| o.img1_img2_blur(m, &mut tmp))
                         .collect();
                     Self::compare_scale_3ch(original_image_scale, modified_image_scale, &img1_img2_blur)
                 },
                 1 => {
-                    let img1_img2_blur = original_image_scale.chan[0].img1_img2_blur(&modified_image_scale.chan[0], tmp);
+                    let img1_img2_blur = original_image_scale.chan[0].img1_img2_blur(&modified_image_scale.chan[0], &mut tmp);
                     Self::compare_scale(&original_image_scale.chan[0], &modified_image_scale.chan[0], &img1_img2_blur)
                 },
                 _ => panic!(),
