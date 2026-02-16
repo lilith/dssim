@@ -27,6 +27,9 @@ fn load_impl(attr: &Dssim, path: &Path) -> Result<DssimImage<f32>, load::LoadErr
 
 /// Load PNG or JPEG image from the given path. Applies color profiles and converts to `sRGB`.
 #[inline]
-pub fn load_image(attr: &Dssim, path: impl AsRef<Path>) -> Result<DssimImage<f32>, load::LoadError> {
+pub fn load_image(
+    attr: &Dssim,
+    path: impl AsRef<Path>,
+) -> Result<DssimImage<f32>, load::LoadError> {
     load_impl(attr, path.as_ref())
 }

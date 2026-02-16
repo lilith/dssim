@@ -1,4 +1,4 @@
-use rgb::{ComponentBytes, Gray, GrayAlpha, RGB, RGBA};
+use rgb::{ComponentBytes, FromSlice, Gray, GrayAlpha, RGB, RGBA};
 use std::io::Cursor;
 use std::path::Path;
 
@@ -8,6 +8,7 @@ pub enum LoadError {
     Png(png::DecodingError),
     Jpeg(zune_jpeg::errors::DecodeErrors),
     ColorProfile(moxcms::CmsError),
+    Pnm(zenpnm::PnmError),
     UnsupportedFormat,
 }
 
@@ -18,7 +19,10 @@ impl std::fmt::Display for LoadError {
             Self::Png(e) => write!(f, "PNG error: {e}"),
             Self::Jpeg(e) => write!(f, "JPEG error: {e}"),
             Self::ColorProfile(e) => write!(f, "Color profile error: {e}"),
-            Self::UnsupportedFormat => write!(f, "Unsupported image format (expected PNG or JPEG)"),
+            Self::Pnm(e) => write!(f, "PNM error: {e}"),
+            Self::UnsupportedFormat => {
+                write!(f, "Unsupported image format (expected PNG, JPEG, or PNM)")
+            }
         }
     }
 }
@@ -30,25 +34,40 @@ impl std::error::Error for LoadError {
             Self::Png(e) => Some(e),
             Self::Jpeg(e) => Some(e),
             Self::ColorProfile(e) => Some(e),
+            Self::Pnm(e) => Some(e),
             Self::UnsupportedFormat => None,
         }
     }
 }
 
 impl From<std::io::Error> for LoadError {
-    fn from(e: std::io::Error) -> Self { Self::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
 }
 
 impl From<png::DecodingError> for LoadError {
-    fn from(e: png::DecodingError) -> Self { Self::Png(e) }
+    fn from(e: png::DecodingError) -> Self {
+        Self::Png(e)
+    }
 }
 
 impl From<zune_jpeg::errors::DecodeErrors> for LoadError {
-    fn from(e: zune_jpeg::errors::DecodeErrors) -> Self { Self::Jpeg(e) }
+    fn from(e: zune_jpeg::errors::DecodeErrors) -> Self {
+        Self::Jpeg(e)
+    }
 }
 
 impl From<moxcms::CmsError> for LoadError {
-    fn from(e: moxcms::CmsError) -> Self { Self::ColorProfile(e) }
+    fn from(e: moxcms::CmsError) -> Self {
+        Self::ColorProfile(e)
+    }
+}
+
+impl From<zenpnm::PnmError> for LoadError {
+    fn from(e: zenpnm::PnmError) -> Self {
+        Self::Pnm(e)
+    }
 }
 
 pub enum PixelData {
@@ -84,6 +103,11 @@ pub fn load_path(path: &Path) -> Result<(usize, usize, PixelData), LoadError> {
         load_png(&data)
     } else if data.starts_with(&[0xFF, 0xD8]) {
         load_jpeg(&data)
+    } else if data.len() >= 2
+        && data[0] == b'P'
+        && matches!(data[1], b'5' | b'6' | b'7' | b'f' | b'F')
+    {
+        load_pnm(&data)
     } else {
         Err(LoadError::UnsupportedFormat)
     }
@@ -114,37 +138,47 @@ fn load_png(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
 
     match (color_type, is_16bit) {
         (png::ColorType::Grayscale, false) => {
-            let mut pixels: Vec<Gray<u8>> = buf[..width * height]
-                .iter()
-                .map(|&v| Gray::new(v))
-                .collect();
+            let mut pixels: Vec<Gray<u8>> = buf[..width * height].as_gray().to_vec();
             if needs_icc {
-                apply_icc_8bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Gray)?;
+                apply_icc_8bit(
+                    pixels.as_mut_slice().as_bytes_mut(),
+                    icc_data.unwrap(),
+                    moxcms::Layout::Gray,
+                )?;
             }
             Ok((width, height, PixelData::Gray8(pixels)))
         }
         (png::ColorType::Grayscale, true) => {
             let mut pixels = bytes_to_gray16_be(&buf, width * height);
             if needs_icc {
-                apply_icc_16bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Gray)?;
+                apply_icc_16bit(
+                    pixels.as_mut_slice().as_bytes_mut(),
+                    icc_data.unwrap(),
+                    moxcms::Layout::Gray,
+                )?;
             }
             Ok((width, height, PixelData::Gray16(pixels)))
         }
         (png::ColorType::GrayscaleAlpha, false) => {
-            let mut pixels: Vec<GrayAlpha<u8>> = buf[..width * height * 2]
-                .chunks_exact(2)
-                .map(|c| GrayAlpha::new(c[0], c[1]))
-                .collect();
+            let mut pixels: Vec<GrayAlpha<u8>> = buf[..width * height * 2].as_gray_alpha().to_vec();
             if is_graya_opaque_u8(&pixels) {
                 // Strip alpha for fully-opaque images (matches load_image behavior)
                 let mut gray: Vec<Gray<u8>> = pixels.iter().map(|p| Gray::new(p.v)).collect();
                 if needs_icc {
-                    apply_icc_8bit(gray.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Gray)?;
+                    apply_icc_8bit(
+                        gray.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::Gray,
+                    )?;
                 }
                 Ok((width, height, PixelData::Gray8(gray)))
             } else {
                 if needs_icc {
-                    apply_icc_8bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::GrayAlpha)?;
+                    apply_icc_8bit(
+                        pixels.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::GrayAlpha,
+                    )?;
                 }
                 Ok((width, height, PixelData::GrayA8(pixels)))
             }
@@ -154,47 +188,66 @@ fn load_png(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
             if is_graya_opaque_u16(&pixels) {
                 let mut gray: Vec<Gray<u16>> = pixels.iter().map(|p| Gray::new(p.v)).collect();
                 if needs_icc {
-                    apply_icc_16bit(gray.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Gray)?;
+                    apply_icc_16bit(
+                        gray.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::Gray,
+                    )?;
                 }
                 Ok((width, height, PixelData::Gray16(gray)))
             } else {
                 if needs_icc {
-                    apply_icc_16bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::GrayAlpha)?;
+                    apply_icc_16bit(
+                        pixels.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::GrayAlpha,
+                    )?;
                 }
                 Ok((width, height, PixelData::GrayA16(pixels)))
             }
         }
         (png::ColorType::Rgb, false) => {
-            let mut pixels: Vec<RGB<u8>> = buf[..width * height * 3]
-                .chunks_exact(3)
-                .map(|c| RGB::new(c[0], c[1], c[2]))
-                .collect();
+            let mut pixels: Vec<RGB<u8>> = buf[..width * height * 3].as_rgb().to_vec();
             if needs_icc {
-                apply_icc_8bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Rgb)?;
+                apply_icc_8bit(
+                    pixels.as_mut_slice().as_bytes_mut(),
+                    icc_data.unwrap(),
+                    moxcms::Layout::Rgb,
+                )?;
             }
             Ok((width, height, PixelData::Rgb8(pixels)))
         }
         (png::ColorType::Rgb, true) => {
             let mut pixels = bytes_to_rgb16_be(&buf, width * height);
             if needs_icc {
-                apply_icc_16bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Rgb)?;
+                apply_icc_16bit(
+                    pixels.as_mut_slice().as_bytes_mut(),
+                    icc_data.unwrap(),
+                    moxcms::Layout::Rgb,
+                )?;
             }
             Ok((width, height, PixelData::Rgb16(pixels)))
         }
         (png::ColorType::Rgba, false) => {
-            let mut pixels: Vec<RGBA<u8>> = buf[..width * height * 4]
-                .chunks_exact(4)
-                .map(|c| RGBA::new(c[0], c[1], c[2], c[3]))
-                .collect();
+            let mut pixels: Vec<RGBA<u8>> = buf[..width * height * 4].as_rgba().to_vec();
             if is_rgba_opaque_u8(&pixels) {
-                let mut rgb: Vec<RGB<u8>> = pixels.iter().map(|p| RGB::new(p.r, p.g, p.b)).collect();
+                let mut rgb: Vec<RGB<u8>> =
+                    pixels.iter().map(|p| RGB::new(p.r, p.g, p.b)).collect();
                 if needs_icc {
-                    apply_icc_8bit(rgb.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Rgb)?;
+                    apply_icc_8bit(
+                        rgb.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::Rgb,
+                    )?;
                 }
                 Ok((width, height, PixelData::Rgb8(rgb)))
             } else {
                 if needs_icc {
-                    apply_icc_8bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Rgba)?;
+                    apply_icc_8bit(
+                        pixels.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::Rgba,
+                    )?;
                 }
                 Ok((width, height, PixelData::Rgba8(pixels)))
             }
@@ -202,14 +255,23 @@ fn load_png(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
         (png::ColorType::Rgba, true) => {
             let mut pixels = bytes_to_rgba16_be(&buf, width * height);
             if is_rgba_opaque_u16(&pixels) {
-                let mut rgb: Vec<RGB<u16>> = pixels.iter().map(|p| RGB::new(p.r, p.g, p.b)).collect();
+                let mut rgb: Vec<RGB<u16>> =
+                    pixels.iter().map(|p| RGB::new(p.r, p.g, p.b)).collect();
                 if needs_icc {
-                    apply_icc_16bit(rgb.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Rgb)?;
+                    apply_icc_16bit(
+                        rgb.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::Rgb,
+                    )?;
                 }
                 Ok((width, height, PixelData::Rgb16(rgb)))
             } else {
                 if needs_icc {
-                    apply_icc_16bit(pixels.as_mut_slice().as_bytes_mut(), icc_data.unwrap(), moxcms::Layout::Rgba)?;
+                    apply_icc_16bit(
+                        pixels.as_mut_slice().as_bytes_mut(),
+                        icc_data.unwrap(),
+                        moxcms::Layout::Rgba,
+                    )?;
                 }
                 Ok((width, height, PixelData::Rgba16(pixels)))
             }
@@ -227,9 +289,9 @@ fn load_jpeg(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
     decoder.decode_headers()?;
 
     let icc_profile = decoder.icc_profile();
-    let (width, height) = decoder.dimensions()
-        .ok_or(LoadError::UnsupportedFormat)?;
-    let input_cs = decoder.input_colorspace()
+    let (width, height) = decoder.dimensions().ok_or(LoadError::UnsupportedFormat)?;
+    let input_cs = decoder
+        .input_colorspace()
         .ok_or(LoadError::UnsupportedFormat)?;
 
     // For grayscale JPEGs, decode as Luma to match the GRAY ICC profile.
@@ -239,7 +301,8 @@ fn load_jpeg(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
     }
 
     let mut pixels = decoder.decode()?;
-    let output_cs = decoder.output_colorspace()
+    let output_cs = decoder
+        .output_colorspace()
         .ok_or(LoadError::UnsupportedFormat)?;
 
     match output_cs {
@@ -259,6 +322,39 @@ fn load_jpeg(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
                 .map(|c| RGB::new(c[0], c[1], c[2]))
                 .collect();
             Ok((width, height, PixelData::Rgb8(rgb)))
+        }
+        _ => Err(LoadError::UnsupportedFormat),
+    }
+}
+
+fn load_pnm(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
+    let decoded = zenpnm::decode(data, zenpnm::Unstoppable)?;
+    let w = decoded.width as usize;
+    let h = decoded.height as usize;
+    let pixels = decoded.pixels();
+
+    match decoded.layout {
+        zenpnm::PixelLayout::Gray8 => Ok((w, h, PixelData::Gray8(pixels.as_gray().to_vec()))),
+        zenpnm::PixelLayout::Rgb8 => Ok((w, h, PixelData::Rgb8(pixels.as_rgb().to_vec()))),
+        zenpnm::PixelLayout::Rgba8 => {
+            let rgba = pixels.as_rgba();
+            if is_rgba_opaque_u8(rgba) {
+                Ok((
+                    w,
+                    h,
+                    PixelData::Rgb8(rgba.iter().map(|p| RGB::new(p.r, p.g, p.b)).collect()),
+                ))
+            } else {
+                Ok((w, h, PixelData::Rgba8(rgba.to_vec())))
+            }
+        }
+        zenpnm::PixelLayout::Gray16 => {
+            // zenpnm provides native-endian u16
+            let gray: Vec<Gray<u16>> = pixels
+                .chunks_exact(2)
+                .map(|c| Gray::new(u16::from_ne_bytes([c[0], c[1]])))
+                .collect();
+            Ok((w, h, PixelData::Gray16(gray)))
         }
         _ => Err(LoadError::UnsupportedFormat),
     }
@@ -290,22 +386,33 @@ fn srgb_destination(is_gray: bool) -> moxcms::ColorProfile {
     }
 }
 
-fn apply_icc_8bit(buf: &mut [u8], icc_data: &[u8], layout: moxcms::Layout) -> Result<(), LoadError> {
+fn apply_icc_8bit(
+    buf: &mut [u8],
+    icc_data: &[u8],
+    layout: moxcms::Layout,
+) -> Result<(), LoadError> {
     let src = moxcms::ColorProfile::new_from_slice(icc_data)?;
     let dst = srgb_destination(icc_is_gray(icc_data));
-    let transform = src.create_transform_8bit(layout, &dst, layout, moxcms::TransformOptions::default())?;
+    let transform =
+        src.create_transform_8bit(layout, &dst, layout, moxcms::TransformOptions::default())?;
     let mut out = vec![0u8; buf.len()];
     transform.transform(buf, &mut out)?;
     buf.copy_from_slice(&out);
     Ok(())
 }
 
-fn apply_icc_16bit(buf: &mut [u8], icc_data: &[u8], layout: moxcms::Layout) -> Result<(), LoadError> {
+fn apply_icc_16bit(
+    buf: &mut [u8],
+    icc_data: &[u8],
+    layout: moxcms::Layout,
+) -> Result<(), LoadError> {
     let src = moxcms::ColorProfile::new_from_slice(icc_data)?;
     let dst = srgb_destination(icc_is_gray(icc_data));
-    let transform = src.create_transform_16bit(layout, &dst, layout, moxcms::TransformOptions::default())?;
+    let transform =
+        src.create_transform_16bit(layout, &dst, layout, moxcms::TransformOptions::default())?;
     let pixel_count = buf.len() / 2;
-    let src_u16: Vec<u16> = buf.chunks_exact(2)
+    let src_u16: Vec<u16> = buf
+        .chunks_exact(2)
         .map(|c| u16::from_ne_bytes([c[0], c[1]]))
         .collect();
     let mut dst_u16 = vec![0u16; pixel_count];
@@ -366,4 +473,3 @@ fn bytes_to_rgba16_be(buf: &[u8], count: usize) -> Vec<RGBA<u16>> {
         })
         .collect()
 }
-
