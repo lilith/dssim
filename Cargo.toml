@@ -63,5 +63,10 @@ debug = false
 panic = "abort"
 strip = true
 
+[profile.profiling]
+inherits = "release"
+debug = 1
+strip = false
+
 [badges]
 maintenance = { status = "actively-developed" }

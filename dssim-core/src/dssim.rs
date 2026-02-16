@@ -374,8 +374,9 @@ impl Dssim {
         (to_dssim(ssim_sum / weight_sum).into(), ssim_maps)
     }
 
-    /// Specialized 3-channel comparison that reads L, A, B channels directly
-    /// without interleaving into LAB structs. Eliminates temporary allocations.
+    /// Specialized 3-channel comparison with manually unrolled channel loop.
+    /// Eliminates zip iterator overhead and branch mispredictions from
+    /// iterating over exactly 3 channels.
     #[inline(never)]
     fn compare_scale_3ch(
         original: &DssimChanScale<f32>,
@@ -384,46 +385,73 @@ impl Dssim {
     ) -> ImgVec<f32> {
         let width = original.chan[0].width;
         let height = original.chan[0].height;
-
-        let c1 = 0.01 * 0.01;
-        let c2 = 0.03 * 0.03;
-        let inv3 = 1.0 / 3.0;
-
         let pixels = width * height;
+
+        let c1: f32 = 0.01 * 0.01;
+        let c2: f32 = 0.03 * 0.03;
+        let inv3: f32 = 1.0 / 3.0;
+
+        // Extract all slice references up front to avoid repeated Vec/struct indexing
+        let (o0, o1, o2) = (&original.chan[0], &original.chan[1], &original.chan[2]);
+        let (m0, m1, m2) = (&modified.chan[0], &modified.chan[1], &modified.chan[2]);
+
+        let o0_mu = &o0.mu[..pixels];
+        let o1_mu = &o1.mu[..pixels];
+        let o2_mu = &o2.mu[..pixels];
+        let m0_mu = &m0.mu[..pixels];
+        let m1_mu = &m1.mu[..pixels];
+        let m2_mu = &m2.mu[..pixels];
+        let o0_sq = &o0.img_sq_blur[..pixels];
+        let o1_sq = &o1.img_sq_blur[..pixels];
+        let o2_sq = &o2.img_sq_blur[..pixels];
+        let m0_sq = &m0.img_sq_blur[..pixels];
+        let m1_sq = &m1.img_sq_blur[..pixels];
+        let m2_sq = &m2.img_sq_blur[..pixels];
+        let i12_0 = &img1_img2_blur[0][..pixels];
+        let i12_1 = &img1_img2_blur[1][..pixels];
+        let i12_2 = &img1_img2_blur[2][..pixels];
+
         let map_out: Vec<f32> = (0..pixels)
             .into_par_iter()
             .with_min_len(1 << 10)
             .map(|i| {
-                let mut mu1_sq = 0.0f32;
-                let mut mu2_sq = 0.0f32;
-                let mut mu1_mu2 = 0.0f32;
-                let mut sigma1_sq = 0.0f32;
-                let mut sigma2_sq = 0.0f32;
-                let mut sigma12 = 0.0f32;
+                // Channel 0 (L)
+                let mu1_0 = o0_mu[i];
+                let mu2_0 = m0_mu[i];
+                let mu1mu1_0 = mu1_0 * mu1_0;
+                let mu2mu2_0 = mu2_0 * mu2_0;
+                let mu1mu2_0 = mu1_0 * mu2_0;
 
-                for ((o, m), i12_blur) in
-                    original.chan.iter().zip(&modified.chan).zip(img1_img2_blur)
-                {
-                    let mu1 = o.mu[i];
-                    let mu2 = m.mu[i];
-                    let mu1mu1 = mu1 * mu1;
-                    let mu2mu2 = mu2 * mu2;
-                    let mu1mu2 = mu1 * mu2;
+                // Channel 1 (a)
+                let mu1_1 = o1_mu[i];
+                let mu2_1 = m1_mu[i];
+                let mu1mu1_1 = mu1_1 * mu1_1;
+                let mu2mu2_1 = mu2_1 * mu2_1;
+                let mu1mu2_1 = mu1_1 * mu2_1;
 
-                    mu1_sq += mu1mu1;
-                    mu2_sq += mu2mu2;
-                    mu1_mu2 += mu1mu2;
-                    sigma1_sq += o.img_sq_blur[i] - mu1mu1;
-                    sigma2_sq += m.img_sq_blur[i] - mu2mu2;
-                    sigma12 += i12_blur[i] - mu1mu2;
-                }
+                // Channel 2 (b)
+                let mu1_2 = o2_mu[i];
+                let mu2_2 = m2_mu[i];
+                let mu1mu1_2 = mu1_2 * mu1_2;
+                let mu2mu2_2 = mu2_2 * mu2_2;
+                let mu1mu2_2 = mu1_2 * mu2_2;
 
-                let mu1_sq = mu1_sq * inv3;
-                let mu2_sq = mu2_sq * inv3;
-                let mu1_mu2 = mu1_mu2 * inv3;
-                let sigma1_sq = sigma1_sq * inv3;
-                let sigma2_sq = sigma2_sq * inv3;
-                let sigma12 = sigma12 * inv3;
+                let mu1_sq = (mu1mu1_0 + mu1mu1_1 + mu1mu1_2) * inv3;
+                let mu2_sq = (mu2mu2_0 + mu2mu2_1 + mu2mu2_2) * inv3;
+                let mu1_mu2 = (mu1mu2_0 + mu1mu2_1 + mu1mu2_2) * inv3;
+
+                let sigma1_sq = ((o0_sq[i] - mu1mu1_0)
+                    + (o1_sq[i] - mu1mu1_1)
+                    + (o2_sq[i] - mu1mu1_2))
+                    * inv3;
+                let sigma2_sq = ((m0_sq[i] - mu2mu2_0)
+                    + (m1_sq[i] - mu2mu2_1)
+                    + (m2_sq[i] - mu2mu2_2))
+                    * inv3;
+                let sigma12 = ((i12_0[i] - mu1mu2_0)
+                    + (i12_1[i] - mu1mu2_1)
+                    + (i12_2[i] - mu1mu2_2))
+                    * inv3;
 
                 (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2)
                     / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
