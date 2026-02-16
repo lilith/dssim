@@ -387,10 +387,6 @@ impl Dssim {
         let height = original.chan[0].height;
         let pixels = width * height;
 
-        let c1: f32 = 0.01 * 0.01;
-        let c2: f32 = 0.03 * 0.03;
-        let inv3: f32 = 1.0 / 3.0;
-
         // Extract all slice references up front to avoid repeated Vec/struct indexing
         let (o0, o1, o2) = (&original.chan[0], &original.chan[1], &original.chan[2]);
         let (m0, m1, m2) = (&modified.chan[0], &modified.chan[1], &modified.chan[2]);
@@ -410,6 +406,55 @@ impl Dssim {
         let i12_0 = &img1_img2_blur[0][..pixels];
         let i12_1 = &img1_img2_blur[1][..pixels];
         let i12_2 = &img1_img2_blur[2][..pixels];
+
+        #[cfg(all(feature = "fma", target_arch = "x86_64"))]
+        {
+            use archmage::SimdToken as _;
+            if let Some(token) = archmage::Desktop64::summon() {
+                let mut map_out = blur::uninit_f32_vec(pixels);
+                map_out
+                    .par_chunks_mut(1024)
+                    .enumerate()
+                    .for_each(|(ci, chunk)| {
+                        let off = ci * 1024;
+                        let len = chunk.len();
+                        crate::ssim_simd::compare_3ch_avx2(
+                            token,
+                            [
+                                &o0_mu[off..off + len],
+                                &o1_mu[off..off + len],
+                                &o2_mu[off..off + len],
+                            ],
+                            [
+                                &m0_mu[off..off + len],
+                                &m1_mu[off..off + len],
+                                &m2_mu[off..off + len],
+                            ],
+                            [
+                                &o0_sq[off..off + len],
+                                &o1_sq[off..off + len],
+                                &o2_sq[off..off + len],
+                            ],
+                            [
+                                &m0_sq[off..off + len],
+                                &m1_sq[off..off + len],
+                                &m2_sq[off..off + len],
+                            ],
+                            [
+                                &i12_0[off..off + len],
+                                &i12_1[off..off + len],
+                                &i12_2[off..off + len],
+                            ],
+                            chunk,
+                        );
+                    });
+                return ImgVec::new(map_out, width, height);
+            }
+        }
+
+        let c1: f32 = 0.01 * 0.01;
+        let c2: f32 = 0.03 * 0.03;
+        let inv3: f32 = 1.0 / 3.0;
 
         let map_out: Vec<f32> = (0..pixels)
             .into_par_iter()
@@ -440,18 +485,12 @@ impl Dssim {
                 let mu2_sq = (mu2mu2_0 + mu2mu2_1 + mu2mu2_2) * inv3;
                 let mu1_mu2 = (mu1mu2_0 + mu1mu2_1 + mu1mu2_2) * inv3;
 
-                let sigma1_sq = ((o0_sq[i] - mu1mu1_0)
-                    + (o1_sq[i] - mu1mu1_1)
-                    + (o2_sq[i] - mu1mu1_2))
-                    * inv3;
-                let sigma2_sq = ((m0_sq[i] - mu2mu2_0)
-                    + (m1_sq[i] - mu2mu2_1)
-                    + (m2_sq[i] - mu2mu2_2))
-                    * inv3;
-                let sigma12 = ((i12_0[i] - mu1mu2_0)
-                    + (i12_1[i] - mu1mu2_1)
-                    + (i12_2[i] - mu1mu2_2))
-                    * inv3;
+                let sigma1_sq =
+                    ((o0_sq[i] - mu1mu1_0) + (o1_sq[i] - mu1mu1_1) + (o2_sq[i] - mu1mu1_2)) * inv3;
+                let sigma2_sq =
+                    ((m0_sq[i] - mu2mu2_0) + (m1_sq[i] - mu2mu2_1) + (m2_sq[i] - mu2mu2_2)) * inv3;
+                let sigma12 =
+                    ((i12_0[i] - mu1mu2_0) + (i12_1[i] - mu1mu2_1) + (i12_2[i] - mu1mu2_2)) * inv3;
 
                 (2.0 * mu1_mu2 + c1) * (2.0 * sigma12 + c2)
                     / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))

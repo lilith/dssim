@@ -19,6 +19,8 @@ mod image;
 mod lieon;
 mod linear;
 #[allow(unsafe_code)]
+mod ssim_simd;
+#[allow(unsafe_code)]
 mod tolab;
 mod val;
 
