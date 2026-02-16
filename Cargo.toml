@@ -33,7 +33,7 @@ ordered-channel = { version = "1.2.0" }
 zenpnm = { path = "../zenpnm", features = ["rgb"] }
 
 [features]
-default = ["threads", "dssim-core/default", "no-macos-vimage"]
+default = ["threads", "dssim-core/default", "no-macos-vimage", "fma"]
 threads = ["dep:rayon", "dssim-core/threads"]
 fma = ["dssim-core/fma"]
 no-macos-vimage = ["dssim-core/no-macos-vimage"]
