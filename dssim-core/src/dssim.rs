@@ -309,16 +309,16 @@ impl Dssim {
                 |(n, (weight, (modified_image_scale, original_image_scale)))| {
                     let scale_width = original_image_scale.chan[0].width;
                     let scale_height = original_image_scale.chan[0].height;
-                    let mut tmp = blur::uninit_f32_vec(scale_width * scale_height);
-
                     let ssim_map = match original_image_scale.chan.len() {
                         3 => {
-                            // Compute per-channel img1*img2 blur without LAB interleaving
-                            let img1_img2_blur: Vec<Vec<f32>> = original_image_scale
-                                .chan
-                                .iter()
-                                .zip(modified_image_scale.chan.iter())
-                                .map(|(o, m)| o.img1_img2_blur(m, &mut tmp))
+                            let pixels = scale_width * scale_height;
+                            let img1_img2_blur: Vec<Vec<f32>> = (0..3usize)
+                                .into_par_iter()
+                                .map(|c| {
+                                    let mut tmp = blur::uninit_f32_vec(pixels);
+                                    original_image_scale.chan[c]
+                                        .img1_img2_blur(&modified_image_scale.chan[c], &mut tmp)
+                                })
                                 .collect();
                             Self::compare_scale_3ch(
                                 original_image_scale,
@@ -327,6 +327,7 @@ impl Dssim {
                             )
                         }
                         1 => {
+                            let mut tmp = blur::uninit_f32_vec(scale_width * scale_height);
                             let img1_img2_blur = original_image_scale.chan[0]
                                 .img1_img2_blur(&modified_image_scale.chan[0], &mut tmp);
                             Self::compare_scale(
