@@ -1,7 +1,24 @@
-#[cfg(any(test, all(target_os = "macos", not(feature = "no-macos-vimage"))))]
+#[cfg(all(target_os = "macos", not(feature = "no-macos-vimage")))]
 const KERNEL: [f32; 9] = [
     0.095332, 0.118095, 0.095332, 0.118095, 0.146293, 0.118095, 0.095332, 0.118095, 0.095332,
 ];
+
+/// Allocate an f32 buffer without zeroing memory.
+///
+/// All blur functions fully write every element of their `tmp` and `dst` buffers
+/// before reading, so uninitialized contents are never observed.
+#[inline]
+#[allow(clippy::uninit_vec)]
+pub(crate) fn uninit_f32_vec(len: usize) -> Vec<f32> {
+    let mut v = Vec::with_capacity(len);
+    // SAFETY: all blur functions (blur_h*, blur_v*) write every element of
+    // their output buffer before any element is read. The caller must uphold
+    // this contract.
+    unsafe {
+        v.set_len(len);
+    }
+    v
+}
 
 #[cfg(all(target_os = "macos", not(feature = "no-macos-vimage")))]
 mod mac {
@@ -120,65 +137,86 @@ mod mac {
 
 #[cfg(not(all(target_os = "macos", not(feature = "no-macos-vimage"))))]
 mod portable {
+    use super::uninit_f32_vec;
     use imgref::*;
 
     // 1D kernel from separable decomposition of the 3×3 kernel.
-    // The original 2D kernel K[r][c] ≈ K1D[r] * K1D[c] (exact to f32 precision).
-    // Symmetric: K1D[0] = K1D[2] = K_SIDE, K1D[1] = K_CENTER.
+    // Symmetric: K1D = [K_SIDE, K_CENTER, K_SIDE].
     const K_SIDE: f32 = 0.308_758_86;
     const K_CENTER: f32 = 0.382_482_8;
 
-    /// Horizontal 1D blur. Reads rows with `src_stride`, writes packed rows (stride = width).
+    // Fused double-blur 5-tap kernel: convolving K1D with itself.
+    // K5 = [K5_OUTER, K5_INNER, K5_MID, K5_INNER, K5_OUTER]
+    // This makes H→V→H→V equivalent to a single H5→V5 pass, halving memory traffic.
+    const K5_OUTER: f32 = K_SIDE * K_SIDE;
+    const K5_INNER: f32 = 2.0 * K_SIDE * K_CENTER;
+    const K5_MID: f32 = 2.0 * K_SIDE * K_SIDE + K_CENTER * K_CENTER;
+
+    /// Horizontal 5-tap blur. Equivalent to two sequential 3-tap horizontal blurs.
     #[inline(never)]
-    fn blur_h(src: &[f32], dst: &mut [f32], width: usize, height: usize, src_stride: usize) {
+    fn blur_h5(src: &[f32], dst: &mut [f32], width: usize, height: usize, src_stride: usize) {
+        let last = width - 1;
         for y in 0..height {
             let row = &src[y * src_stride..][..width];
             let out = &mut dst[y * width..][..width];
 
-            // Left edge: clamp left neighbor to position 0
-            let right = if width > 1 { row[1] } else { row[0] };
-            out[0] = (row[0] + right) * K_SIDE + row[0] * K_CENTER;
-
-            // Inner pixels
-            for i in 1..width.saturating_sub(1) {
-                out[i] = (row[i - 1] + row[i + 1]) * K_SIDE + row[i] * K_CENTER;
+            // Left edge pixels (0, 1): clamp negative indices to 0
+            for i in 0..2.min(width) {
+                let m2 = row[0]; // i-2 and i-1 clamp to 0
+                let m1 = if i >= 1 { row[i - 1] } else { row[0] };
+                let p1 = if i < last { row[i + 1] } else { row[last] };
+                let p2 = if i + 2 <= last { row[i + 2] } else { row[last] };
+                out[i] = (m2 + p2) * K5_OUTER + (m1 + p1) * K5_INNER + row[i] * K5_MID;
             }
 
-            // Right edge: clamp right neighbor to last position
-            if width > 1 {
-                let i = width - 1;
-                out[i] = (row[i - 1] + row[i]) * K_SIDE + row[i] * K_CENTER;
+            // Inner pixels: 2 <= i <= width-3
+            for i in 2..width.saturating_sub(2) {
+                out[i] = (row[i - 2] + row[i + 2]) * K5_OUTER
+                    + (row[i - 1] + row[i + 1]) * K5_INNER
+                    + row[i] * K5_MID;
+            }
+
+            // Right edge pixels: clamp beyond-end indices to last
+            for i in width.saturating_sub(2).max(2)..width {
+                let p1 = if i < last { row[i + 1] } else { row[last] };
+                let p2 = if i + 2 <= last { row[i + 2] } else { row[last] };
+                out[i] =
+                    (row[i - 2] + p2) * K5_OUTER + (row[i - 1] + p1) * K5_INNER + row[i] * K5_MID;
             }
         }
     }
 
-    /// Vertical 1D blur. Reads packed rows (stride = width), writes rows with `dst_stride`.
+    /// Vertical 5-tap blur. Equivalent to two sequential 3-tap vertical blurs.
     #[inline(never)]
-    fn blur_v(src: &[f32], dst: &mut [f32], width: usize, height: usize, dst_stride: usize) {
-        let mut prev = &src[0..width];
-        let mut curr = prev;
-        let mut next = prev;
+    fn blur_v5(src: &[f32], dst: &mut [f32], width: usize, height: usize, dst_stride: usize) {
+        let last_y = height - 1;
 
         for y in 0..height {
-            prev = curr;
-            curr = next;
-            next = if y + 1 < height {
-                &src[(y + 1) * width..][..width]
-            } else {
-                curr
-            };
+            let ym2 = y.saturating_sub(2);
+            let ym1 = y.saturating_sub(1);
+            let yp1 = (y + 1).min(last_y);
+            let yp2 = (y + 2).min(last_y);
+
+            let rm2 = &src[ym2 * width..][..width];
+            let rm1 = &src[ym1 * width..][..width];
+            let rc = &src[y * width..][..width];
+            let rp1 = &src[yp1 * width..][..width];
+            let rp2 = &src[yp2 * width..][..width];
 
             let out = &mut dst[y * dst_stride..][..width];
+
             for x in 0..width {
-                out[x] = (prev[x] + next[x]) * K_SIDE + curr[x] * K_CENTER;
+                out[x] =
+                    (rm2[x] + rp2[x]) * K5_OUTER + (rm1[x] + rp1[x]) * K5_INNER + rc[x] * K5_MID;
             }
         }
     }
 
-    /// Horizontal blur with fused element-wise multiply.
-    /// Computes blur(src1 * src2) by integrating the multiply into the first H pass.
+    /// Horizontal 5-tap blur with fused element-wise multiply.
+    /// Computes blur(src1 * src2) in a single H5 pass.
+    #[allow(clippy::too_many_arguments)]
     #[inline(never)]
-    fn blur_h_mul(
+    fn blur_h5_mul(
         src1: &[f32],
         src2: &[f32],
         dst: &mut [f32],
@@ -187,33 +225,40 @@ mod portable {
         stride1: usize,
         stride2: usize,
     ) {
+        let last = width - 1;
         for y in 0..height {
             let r1 = &src1[y * stride1..][..width];
             let r2 = &src2[y * stride2..][..width];
             let out = &mut dst[y * width..][..width];
 
-            // Sliding window of products to avoid redundant multiplies
-            let mut p_prev = r1[0] * r2[0];
-            let mut p_curr = p_prev;
-            let mut p_next = if width > 1 { r1[1] * r2[1] } else { p_curr };
+            // General clamped access for edge pixels
+            let clamp = |i: isize| i.max(0).min(last as isize) as usize;
+            let prod = |i: isize| r1[clamp(i)] * r2[clamp(i)];
 
-            // Left edge: clamp left neighbor to position 0
-            out[0] = (p_curr + p_next) * K_SIDE + p_curr * K_CENTER;
-
-            // Inner pixels
-            for i in 1..width.saturating_sub(1) {
-                p_prev = p_curr;
-                p_curr = p_next;
-                p_next = r1[i + 1] * r2[i + 1];
-                out[i] = (p_prev + p_next) * K_SIDE + p_curr * K_CENTER;
+            // Left edge pixels
+            for i in 0..2.min(width) {
+                let ii = i as isize;
+                out[i] = (prod(ii - 2) + prod(ii + 2)) * K5_OUTER
+                    + (prod(ii - 1) + prod(ii + 1)) * K5_INNER
+                    + (r1[i] * r2[i]) * K5_MID;
             }
 
-            // Right edge: clamp right neighbor to last position
-            if width > 1 {
-                let i = width - 1;
-                p_prev = p_curr;
-                p_curr = p_next;
-                out[i] = (p_prev + p_curr) * K_SIDE + p_curr * K_CENTER;
+            // Inner pixels
+            for i in 2..width.saturating_sub(2) {
+                let pm2 = r1[i - 2] * r2[i - 2];
+                let pm1 = r1[i - 1] * r2[i - 1];
+                let pc = r1[i] * r2[i];
+                let pp1 = r1[i + 1] * r2[i + 1];
+                let pp2 = r1[i + 2] * r2[i + 2];
+                out[i] = (pm2 + pp2) * K5_OUTER + (pm1 + pp1) * K5_INNER + pc * K5_MID;
+            }
+
+            // Right edge pixels
+            for i in width.saturating_sub(2).max(2)..width {
+                let ii = i as isize;
+                out[i] = (prod(ii - 2) + prod(ii + 2)) * K5_OUTER
+                    + (prod(ii - 1) + prod(ii + 1)) * K5_INNER
+                    + (r1[i] * r2[i]) * K5_MID;
             }
         }
     }
@@ -221,7 +266,7 @@ mod portable {
     // ── AVX2+FMA SIMD path ──────────────────────────────────────────────
     #[cfg(all(feature = "fma", target_arch = "x86_64"))]
     mod simd {
-        use super::{K_CENTER, K_SIDE};
+        use super::{K5_INNER, K5_MID, K5_OUTER};
         use archmage::prelude::*;
         use magetypes::simd::f32x8;
 
@@ -235,10 +280,8 @@ mod portable {
             h: usize,
             stride: usize,
         ) {
-            blur_h_simd(t, buf, tmp, w, h, stride);
-            blur_v_simd(t, tmp, dst, w, h, w);
-            blur_h_simd(t, dst, tmp, w, h, w);
-            blur_v_simd(t, tmp, dst, w, h, w);
+            blur_h5_simd(t, buf, tmp, w, h, stride);
+            blur_v5_simd(t, tmp, dst, w, h, w);
         }
 
         #[arcane]
@@ -250,10 +293,8 @@ mod portable {
             h: usize,
             stride: usize,
         ) {
-            blur_h_simd(t, buf, tmp, w, h, stride);
-            blur_v_simd(t, tmp, buf, w, h, stride);
-            blur_h_simd(t, buf, tmp, w, h, stride);
-            blur_v_simd(t, tmp, buf, w, h, stride);
+            blur_h5_simd(t, buf, tmp, w, h, stride);
+            blur_v5_simd(t, tmp, buf, w, h, stride);
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -269,14 +310,12 @@ mod portable {
             stride1: usize,
             stride2: usize,
         ) {
-            blur_h_mul_simd(t, src1, src2, tmp, w, h, stride1, stride2);
-            blur_v_simd(t, tmp, dst, w, h, w);
-            blur_h_simd(t, dst, tmp, w, h, w);
-            blur_v_simd(t, tmp, dst, w, h, w);
+            blur_h5_mul_simd(t, src1, src2, tmp, w, h, stride1, stride2);
+            blur_v5_simd(t, tmp, dst, w, h, w);
         }
 
         #[rite]
-        fn blur_h_simd(
+        fn blur_h5_simd(
             t: Desktop64,
             src: &[f32],
             dst: &mut [f32],
@@ -284,46 +323,54 @@ mod portable {
             height: usize,
             src_stride: usize,
         ) {
-            let vk_side = f32x8::splat(t, K_SIDE);
-            let vk_center = f32x8::splat(t, K_CENTER);
+            let vk_outer = f32x8::splat(t, K5_OUTER);
+            let vk_inner = f32x8::splat(t, K5_INNER);
+            let vk_mid = f32x8::splat(t, K5_MID);
+            let last = width - 1;
 
             for y in 0..height {
                 let row = &src[y * src_stride..][..width];
                 let out = &mut dst[y * width..][..width];
 
-                // Left edge: scalar (1px)
-                let right = if width > 1 { row[1] } else { row[0] };
-                out[0] = (row[0] + right) * K_SIDE + row[0] * K_CENTER;
+                // Left edge: scalar (2 pixels)
+                for i in 0..2.min(width) {
+                    let ii = i as isize;
+                    let get = |j: isize| row[j.max(0).min(last as isize) as usize];
+                    out[i] = (get(ii - 2) + get(ii + 2)) * K5_OUTER
+                        + (get(ii - 1) + get(ii + 1)) * K5_INNER
+                        + row[i] * K5_MID;
+                }
 
-                // SIMD loop: process 8 pixels at a time
-                // Needs row[i-1..i+7], row[i..i+8], row[i+1..i+9] all valid
-                let mut i = 1;
-                while i + 9 <= width {
+                // SIMD loop: needs row[i-2..i+10] valid
+                let mut i = 2;
+                while i + 10 <= width {
+                    let far_left = f32x8::load(t, (&row[i - 2..i + 6]).try_into().unwrap());
                     let left = f32x8::load(t, (&row[i - 1..i + 7]).try_into().unwrap());
                     let center = f32x8::load(t, (&row[i..i + 8]).try_into().unwrap());
                     let right = f32x8::load(t, (&row[i + 1..i + 9]).try_into().unwrap());
-                    let sides = left + right;
-                    let result = sides.mul_add(vk_side, center * vk_center);
+                    let far_right = f32x8::load(t, (&row[i + 2..i + 10]).try_into().unwrap());
+                    let outer_sum = far_left + far_right;
+                    let inner_sum = left + right;
+                    let result =
+                        outer_sum.mul_add(vk_outer, inner_sum.mul_add(vk_inner, center * vk_mid));
                     result.store((&mut out[i..i + 8]).try_into().unwrap());
                     i += 8;
                 }
 
-                // Scalar tail
-                while i < width.saturating_sub(1) {
-                    out[i] = (row[i - 1] + row[i + 1]) * K_SIDE + row[i] * K_CENTER;
+                // Scalar tail + right edges
+                while i < width {
+                    let ii = i as isize;
+                    let get = |j: isize| row[j.max(0).min(last as isize) as usize];
+                    out[i] = (get(ii - 2) + get(ii + 2)) * K5_OUTER
+                        + (get(ii - 1) + get(ii + 1)) * K5_INNER
+                        + row[i] * K5_MID;
                     i += 1;
-                }
-
-                // Right edge
-                if width > 1 {
-                    let last = width - 1;
-                    out[last] = (row[last - 1] + row[last]) * K_SIDE + row[last] * K_CENTER;
                 }
             }
         }
 
         #[rite]
-        fn blur_v_simd(
+        fn blur_v5_simd(
             t: Desktop64,
             src: &[f32],
             dst: &mut [f32],
@@ -331,38 +378,44 @@ mod portable {
             height: usize,
             dst_stride: usize,
         ) {
-            let vk_side = f32x8::splat(t, K_SIDE);
-            let vk_center = f32x8::splat(t, K_CENTER);
+            let vk_outer = f32x8::splat(t, K5_OUTER);
+            let vk_inner = f32x8::splat(t, K5_INNER);
+            let vk_mid = f32x8::splat(t, K5_MID);
+            let last_y = height - 1;
 
             for y in 0..height {
-                let prev = if y > 0 {
-                    &src[(y - 1) * width..][..width]
-                } else {
-                    &src[0..width]
-                };
-                let curr = &src[y * width..][..width];
-                let next = if y + 1 < height {
-                    &src[(y + 1) * width..][..width]
-                } else {
-                    curr
-                };
+                let ym2 = y.saturating_sub(2);
+                let ym1 = y.saturating_sub(1);
+                let yp1 = (y + 1).min(last_y);
+                let yp2 = (y + 2).min(last_y);
+
+                let rm2 = &src[ym2 * width..][..width];
+                let rm1 = &src[ym1 * width..][..width];
+                let rc = &src[y * width..][..width];
+                let rp1 = &src[yp1 * width..][..width];
+                let rp2 = &src[yp2 * width..][..width];
 
                 let out = &mut dst[y * dst_stride..][..width];
 
                 let mut x = 0;
                 while x + 8 <= width {
-                    let vprev = f32x8::load(t, (&prev[x..x + 8]).try_into().unwrap());
-                    let vcurr = f32x8::load(t, (&curr[x..x + 8]).try_into().unwrap());
-                    let vnext = f32x8::load(t, (&next[x..x + 8]).try_into().unwrap());
-                    let sides = vprev + vnext;
-                    let result = sides.mul_add(vk_side, vcurr * vk_center);
+                    let vm2 = f32x8::load(t, (&rm2[x..x + 8]).try_into().unwrap());
+                    let vm1 = f32x8::load(t, (&rm1[x..x + 8]).try_into().unwrap());
+                    let vc = f32x8::load(t, (&rc[x..x + 8]).try_into().unwrap());
+                    let vp1 = f32x8::load(t, (&rp1[x..x + 8]).try_into().unwrap());
+                    let vp2 = f32x8::load(t, (&rp2[x..x + 8]).try_into().unwrap());
+                    let outer = vm2 + vp2;
+                    let inner = vm1 + vp1;
+                    let result = outer.mul_add(vk_outer, inner.mul_add(vk_inner, vc * vk_mid));
                     result.store((&mut out[x..x + 8]).try_into().unwrap());
                     x += 8;
                 }
 
                 // Scalar tail
                 while x < width {
-                    out[x] = (prev[x] + next[x]) * K_SIDE + curr[x] * K_CENTER;
+                    out[x] = (rm2[x] + rp2[x]) * K5_OUTER
+                        + (rm1[x] + rp1[x]) * K5_INNER
+                        + rc[x] * K5_MID;
                     x += 1;
                 }
             }
@@ -370,7 +423,7 @@ mod portable {
 
         #[allow(clippy::too_many_arguments)]
         #[rite]
-        fn blur_h_mul_simd(
+        fn blur_h5_mul_simd(
             t: Desktop64,
             src1: &[f32],
             src2: &[f32],
@@ -380,53 +433,62 @@ mod portable {
             stride1: usize,
             stride2: usize,
         ) {
-            let vk_side = f32x8::splat(t, K_SIDE);
-            let vk_center = f32x8::splat(t, K_CENTER);
+            let vk_outer = f32x8::splat(t, K5_OUTER);
+            let vk_inner = f32x8::splat(t, K5_INNER);
+            let vk_mid = f32x8::splat(t, K5_MID);
+            let last = width - 1;
 
             for y in 0..height {
                 let r1 = &src1[y * stride1..][..width];
                 let r2 = &src2[y * stride2..][..width];
                 let out = &mut dst[y * width..][..width];
 
-                // Left edge: scalar
-                let p_curr = r1[0] * r2[0];
-                let p_right = if width > 1 { r1[1] * r2[1] } else { p_curr };
-                out[0] = (p_curr + p_right) * K_SIDE + p_curr * K_CENTER;
+                // Left edge: scalar (2 pixels)
+                for i in 0..2.min(width) {
+                    let ii = i as isize;
+                    let cl = |j: isize| j.max(0).min(last as isize) as usize;
+                    let p = |j: isize| r1[cl(j)] * r2[cl(j)];
+                    out[i] = (p(ii - 2) + p(ii + 2)) * K5_OUTER
+                        + (p(ii - 1) + p(ii + 1)) * K5_INNER
+                        + (r1[i] * r2[i]) * K5_MID;
+                }
 
-                // SIMD loop: 6 loads per 8px (3 pairs from src1, src2)
-                let mut i = 1;
-                while i + 9 <= width {
-                    let l1 = f32x8::load(t, (&r1[i - 1..i + 7]).try_into().unwrap());
-                    let l2 = f32x8::load(t, (&r2[i - 1..i + 7]).try_into().unwrap());
-                    let c1 = f32x8::load(t, (&r1[i..i + 8]).try_into().unwrap());
-                    let c2 = f32x8::load(t, (&r2[i..i + 8]).try_into().unwrap());
-                    let ri1 = f32x8::load(t, (&r1[i + 1..i + 9]).try_into().unwrap());
-                    let ri2 = f32x8::load(t, (&r2[i + 1..i + 9]).try_into().unwrap());
+                // SIMD loop: needs [i-2..i+10] valid from both sources
+                let mut i = 2;
+                while i + 10 <= width {
+                    let l1m2 = f32x8::load(t, (&r1[i - 2..i + 6]).try_into().unwrap());
+                    let l2m2 = f32x8::load(t, (&r2[i - 2..i + 6]).try_into().unwrap());
+                    let l1m1 = f32x8::load(t, (&r1[i - 1..i + 7]).try_into().unwrap());
+                    let l2m1 = f32x8::load(t, (&r2[i - 1..i + 7]).try_into().unwrap());
+                    let l1c = f32x8::load(t, (&r1[i..i + 8]).try_into().unwrap());
+                    let l2c = f32x8::load(t, (&r2[i..i + 8]).try_into().unwrap());
+                    let l1p1 = f32x8::load(t, (&r1[i + 1..i + 9]).try_into().unwrap());
+                    let l2p1 = f32x8::load(t, (&r2[i + 1..i + 9]).try_into().unwrap());
+                    let l1p2 = f32x8::load(t, (&r1[i + 2..i + 10]).try_into().unwrap());
+                    let l2p2 = f32x8::load(t, (&r2[i + 2..i + 10]).try_into().unwrap());
 
-                    let p_left = l1 * l2;
-                    let p_center = c1 * c2;
-                    let p_right = ri1 * ri2;
-                    let sides = p_left + p_right;
-                    let result = sides.mul_add(vk_side, p_center * vk_center);
+                    let p_m2 = l1m2 * l2m2;
+                    let p_m1 = l1m1 * l2m1;
+                    let p_c = l1c * l2c;
+                    let p_p1 = l1p1 * l2p1;
+                    let p_p2 = l1p2 * l2p2;
+
+                    let outer = p_m2 + p_p2;
+                    let inner = p_m1 + p_p1;
+                    let result = outer.mul_add(vk_outer, inner.mul_add(vk_inner, p_c * vk_mid));
                     result.store((&mut out[i..i + 8]).try_into().unwrap());
                     i += 8;
                 }
 
-                // Scalar tail
-                while i < width.saturating_sub(1) {
-                    let pl = r1[i - 1] * r2[i - 1];
-                    let pc = r1[i] * r2[i];
-                    let pr = r1[i + 1] * r2[i + 1];
-                    out[i] = (pl + pr) * K_SIDE + pc * K_CENTER;
+                // Scalar tail + right edges
+                while i < width {
+                    let ii = i as isize;
+                    let cl = |j: isize| j.max(0).min(last as isize) as usize;
+                    let p = |j: isize| r1[cl(j)] * r2[cl(j)];
+                    out[i] = (p(ii - 2) + p(ii + 2)) * K5_OUTER
+                        + (p(ii - 1) + p(ii + 1)) * K5_INNER
+                        + (r1[i] * r2[i]) * K5_MID;
                     i += 1;
-                }
-
-                // Right edge
-                if width > 1 {
-                    let last = width - 1;
-                    let pl = r1[last - 1] * r2[last - 1];
-                    let pc = r1[last] * r2[last];
-                    out[last] = (pl + pc) * K_SIDE + pc * K_CENTER;
                 }
             }
         }
@@ -442,7 +504,7 @@ mod portable {
         let pixels = width * height;
         assert!(tmp.len() >= pixels);
         let tmp = &mut tmp[..pixels];
-        let mut dst = vec![0.0f32; pixels];
+        let mut dst = uninit_f32_vec(pixels);
 
         #[cfg(all(feature = "fma", target_arch = "x86_64"))]
         {
@@ -453,10 +515,8 @@ mod portable {
             }
         }
 
-        blur_h(src.buf(), tmp, width, height, src.stride());
-        blur_v(tmp, &mut dst, width, height, width);
-        blur_h(&dst, tmp, width, height, width);
-        blur_v(tmp, &mut dst, width, height, width);
+        blur_h5(src.buf(), tmp, width, height, src.stride());
+        blur_v5(tmp, &mut dst, width, height, width);
 
         ImgVec::new(dst, width, height)
     }
@@ -480,15 +540,12 @@ mod portable {
             }
         }
 
-        blur_h(buf, tmp, width, height, stride);
-        blur_v(tmp, buf, width, height, stride);
-        blur_h(buf, tmp, width, height, stride);
-        blur_v(tmp, buf, width, height, stride);
+        blur_h5(buf, tmp, width, height, stride);
+        blur_v5(tmp, buf, width, height, stride);
     }
 
     /// Blur the element-wise product of two images: blur(src1 * src2).
-    /// Fuses the multiply into the first horizontal pass to save a full memory
-    /// pass and avoid allocating an intermediate product buffer.
+    /// Fuses the multiply into the horizontal pass, then does a single vertical pass.
     pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [f32]) -> Vec<f32> {
         let width = src1.width();
         let height = src1.height();
@@ -500,7 +557,7 @@ mod portable {
         let pixels = width * height;
         assert!(tmp.len() >= pixels);
         let tmp = &mut tmp[..pixels];
-        let mut dst = vec![0.0f32; pixels];
+        let mut dst = uninit_f32_vec(pixels);
 
         #[cfg(all(feature = "fma", target_arch = "x86_64"))]
         {
@@ -521,7 +578,7 @@ mod portable {
             }
         }
 
-        blur_h_mul(
+        blur_h5_mul(
             src1.buf(),
             src2.buf(),
             tmp,
@@ -530,9 +587,7 @@ mod portable {
             src1.stride(),
             src2.stride(),
         );
-        blur_v(tmp, &mut dst, width, height, width);
-        blur_h(&dst, tmp, width, height, width);
-        blur_v(tmp, &mut dst, width, height, width);
+        blur_v5(tmp, &mut dst, width, height, width);
 
         dst
     }
@@ -627,53 +682,7 @@ fn blur_two() {
 
     assert_eq!(&src2, dst.buf());
 
-    let z00 = 0. * KERNEL[0]
-        + 0. * KERNEL[1]
-        + 1. * KERNEL[2]
-        + 0. * KERNEL[3]
-        + 0. * KERNEL[4]
-        + 1. * KERNEL[5]
-        + 1. * KERNEL[6]
-        + 1. * KERNEL[7]
-        + 1. * KERNEL[8];
-    let z01 = 0. * KERNEL[0]
-        + 1. * KERNEL[1]
-        + 1. * KERNEL[2]
-        + 0. * KERNEL[3]
-        + 1. * KERNEL[4]
-        + 1. * KERNEL[5]
-        + 1. * KERNEL[6]
-        + 1. * KERNEL[7]
-        + 1. * KERNEL[8];
-
-    let z10 = 0. * KERNEL[0]
-        + 0. * KERNEL[1]
-        + 1. * KERNEL[2]
-        + 1. * KERNEL[3]
-        + 1. * KERNEL[4]
-        + 1. * KERNEL[5]
-        + 1. * KERNEL[6]
-        + 1. * KERNEL[7]
-        + 1. * KERNEL[8];
-    let z11 = 0. * KERNEL[0]
-        + 1. * KERNEL[1]
-        + 1. * KERNEL[2]
-        + 1. * KERNEL[3]
-        + 1. * KERNEL[4]
-        + 1. * KERNEL[5]
-        + 1. * KERNEL[6]
-        + 1. * KERNEL[7]
-        + 1. * KERNEL[8];
-    let exp = z00 * KERNEL[0]
-        + z00 * KERNEL[1]
-        + z01 * KERNEL[2]
-        + z00 * KERNEL[3]
-        + z00 * KERNEL[4]
-        + z01 * KERNEL[5]
-        + z10 * KERNEL[6]
-        + z10 * KERNEL[7]
-        + z11 * KERNEL[8];
-
+    // All-1 corners should remain 1.0 (kernel is normalized)
     assert!((1. - dst.buf()[3]).abs() < 0.0001, "{}", dst.buf()[3]);
     assert!(
         (1. - dst.buf()[3 * 4]).abs() < 0.0001,
@@ -685,5 +694,39 @@ fn blur_two() {
         "{}",
         dst.buf()[4 * 4 - 1]
     );
-    assert!((f64::from(exp) - f64::from(dst.buf()[0])).abs() < 0.0001);
+
+    // Reference 5-tap computation for corner [0][0]
+    let k_side: f32 = 0.308_758_86;
+    let k_center: f32 = 0.382_482_8;
+    let k5o = k_side * k_side;
+    let k5i = 2.0 * k_side * k_center;
+    let k5m = 2.0 * k_side * k_side + k_center * k_center;
+    let cl = |i: isize, max: usize| i.max(0).min(max as isize) as usize;
+
+    // H5 pass on 4×4
+    let mut h = [0.0f32; 16];
+    for y in 0..4 {
+        for x in 0..4usize {
+            let xi = x as isize;
+            h[y * 4 + x] = (src[y * 4 + cl(xi - 2, 3)] + src[y * 4 + cl(xi + 2, 3)]) * k5o
+                + (src[y * 4 + cl(xi - 1, 3)] + src[y * 4 + cl(xi + 1, 3)]) * k5i
+                + src[y * 4 + x] * k5m;
+        }
+    }
+    // V5 pass
+    let mut exp_all = [0.0f32; 16];
+    for y in 0..4usize {
+        for x in 0..4 {
+            let yi = y as isize;
+            exp_all[y * 4 + x] = (h[cl(yi - 2, 3) * 4 + x] + h[cl(yi + 2, 3) * 4 + x]) * k5o
+                + (h[cl(yi - 1, 3) * 4 + x] + h[cl(yi + 1, 3) * 4 + x]) * k5i
+                + h[y * 4 + x] * k5m;
+        }
+    }
+    let exp = exp_all[0];
+    assert!(
+        (f64::from(exp) - f64::from(dst.buf()[0])).abs() < 0.0001,
+        "expected {exp}, got {}",
+        dst.buf()[0]
+    );
 }

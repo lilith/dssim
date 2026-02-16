@@ -248,7 +248,7 @@ impl Dssim {
                                 let mut ch = DssimChan::new(l, n > 0);
 
                                 let pixels = w * h;
-                                let mut tmp = vec![0f32; pixels];
+                                let mut tmp = blur::uninit_f32_vec(pixels);
                                 ch.preprocess(&mut tmp);
                                 ch
                             })
@@ -309,7 +309,7 @@ impl Dssim {
                 |(n, (weight, (modified_image_scale, original_image_scale)))| {
                     let scale_width = original_image_scale.chan[0].width;
                     let scale_height = original_image_scale.chan[0].height;
-                    let mut tmp = vec![0f32; scale_width * scale_height];
+                    let mut tmp = blur::uninit_f32_vec(scale_width * scale_height);
 
                     let ssim_map = match original_image_scale.chan.len() {
                         3 => {
