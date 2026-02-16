@@ -28,6 +28,7 @@ pub type vImage_Error = isize;
 pub type Pixel_F = f32;
 
 #[repr(u32)]
+#[allow(clippy::enum_variant_names)] // FFI: Apple vImage naming convention
 pub enum vImage_Flags {
     kvImageNoFlags = 0,
 

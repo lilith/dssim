@@ -6,7 +6,7 @@ use rgb::*;
 #[doc(hidden)]
 pub trait GammaComponent {
     type Lut;
-    fn max_value() -> usize;
+    const COMPONENT_MAX: f32;
     fn to_linear(&self, lut: &Self::Lut) -> f32;
     fn make_lut() -> Self::Lut;
 }
@@ -52,9 +52,7 @@ pub trait ToRGBAPLU {
 
 impl GammaComponent for u8 {
     type Lut = [f32; 256];
-    fn max_value() -> usize {
-        255
-    }
+    const COMPONENT_MAX: f32 = 255.;
     #[inline(always)]
     fn to_linear(&self, lut: &Self::Lut) -> f32 {
         lut[*self as usize]
@@ -64,7 +62,7 @@ impl GammaComponent for u8 {
     fn make_lut() -> Self::Lut {
         let mut out = [0.; 256];
         for (i, o) in out.iter_mut().enumerate() {
-            *o = to_linear(i as f32 / f32::from(Self::max_value()));
+            *o = to_linear(i as f32 / Self::COMPONENT_MAX);
         }
         out
     }
@@ -72,9 +70,7 @@ impl GammaComponent for u8 {
 
 impl GammaComponent for u16 {
     type Lut = [f32; 65536];
-    fn max_value() -> usize {
-        65535
-    }
+    const COMPONENT_MAX: f32 = 65535.;
     #[inline(always)]
     fn to_linear(&self, lut: &Self::Lut) -> f32 {
         lut[*self as usize]
@@ -84,7 +80,7 @@ impl GammaComponent for u16 {
     fn make_lut() -> Self::Lut {
         let mut out = [0.; 65536];
         for (i, o) in out.iter_mut().enumerate() {
-            *o = to_linear(i as f32 / f32::from(Self::max_value()));
+            *o = to_linear(i as f32 / Self::COMPONENT_MAX);
         }
         out
     }
@@ -98,7 +94,7 @@ where
     type Output = RGBAPLU;
     #[inline]
     fn to_linear(&self, gamma_lut: &M::Lut) -> RGBAPLU {
-        let a_unit = self.a.clone().into() / M::max_value() as f32;
+        let a_unit = self.a.clone().into() / M::COMPONENT_MAX;
         RGBAPLU {
             r: self.r.to_linear(gamma_lut) * a_unit,
             g: self.g.to_linear(gamma_lut) * a_unit,
@@ -117,7 +113,7 @@ where
 
     #[inline]
     fn to_linear(&self, gamma_lut: &M::Lut) -> RGBAPLU {
-        let a_unit = self.a.clone().into() / M::max_value() as f32;
+        let a_unit = self.a.clone().into() / M::COMPONENT_MAX;
         RGBAPLU {
             r: self.r.to_linear(gamma_lut) * a_unit,
             g: self.g.to_linear(gamma_lut) * a_unit,
@@ -170,7 +166,7 @@ where
     type Output = RGBAPLU;
 
     fn to_linear(&self, gamma_lut: &M::Lut) -> RGBAPLU {
-        let a_unit = self.value().into() / M::max_value() as f32;
+        let a_unit = self.value().into() / M::COMPONENT_MAX;
         let g = self.value().to_linear(gamma_lut);
         RGBAPLU {
             r: g * a_unit,

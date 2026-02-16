@@ -582,7 +582,7 @@ impl Dssim {
 }
 
 fn to_dssim(ssim: f64) -> f64 {
-    1.0 / ssim.max(std::f64::EPSILON) - 1.0
+    1.0 / ssim.max(f64::EPSILON) - 1.0
 }
 
 #[test]
