@@ -4,14 +4,14 @@ use rgb::{RGB8, RGBA8};
 pub type DssimImage = crate::DssimImage<f32>;
 
 /// Create new context for comparisons
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn dssim_new() -> *mut Dssim {
     let d = Box::new(crate::new());
     Box::into_raw(d)
 }
 
 /// Free the context
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dssim_free(d: *mut Dssim) {
     if d.is_null() {
         return;
@@ -24,7 +24,7 @@ pub unsafe extern "C" fn dssim_free(d: *mut Dssim) {
 /// Pixels are copied. Returns NULL on error.
 ///
 /// Call `dssim_free_image` to free memory when the image is no longer needed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dssim_create_image_rgba(
     dssim: &mut Dssim,
     pixels: *const u8,
@@ -45,7 +45,7 @@ pub unsafe extern "C" fn dssim_create_image_rgba(
 /// Pixels are copied. Returns NULL on error.
 ///
 /// Call `dssim_free_image` to free memory when the image is no longer needed.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dssim_create_image_rgb(
     dssim: &mut Dssim,
     pixels: *const u8,
@@ -62,7 +62,7 @@ pub unsafe extern "C" fn dssim_create_image_rgb(
 }
 
 /// Free image data
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dssim_free_image(img: *mut DssimImage) {
     if img.is_null() {
         return;
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn dssim_free_image(img: *mut DssimImage) {
 /// `img1` can be reused for multiple comparisons.
 ///
 /// Don't forget to free the images and the DSSIM context when done.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn dssim_compare(
     dssim: &mut Dssim,
     img1: *const DssimImage,
