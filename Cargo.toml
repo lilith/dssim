@@ -30,7 +30,7 @@ zune-jpeg = "0.5"
 moxcms = "0.8"
 crossbeam-channel = "0.5.15"
 ordered-channel = { version = "1.2.0" }
-zenpnm = { path = "../zenpnm", features = ["rgb"] }
+zenbitmaps = { path = "../zenbitmaps", features = ["rgb"] }
 
 [features]
 default = ["threads", "dssim-core/default", "no-macos-vimage", "fma"]

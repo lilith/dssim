@@ -8,7 +8,7 @@ pub enum LoadError {
     Png(png::DecodingError),
     Jpeg(zune_jpeg::errors::DecodeErrors),
     ColorProfile(moxcms::CmsError),
-    Pnm(zenpnm::PnmError),
+    Pnm(zenbitmaps::BitmapError),
     UnsupportedFormat,
 }
 
@@ -64,8 +64,8 @@ impl From<moxcms::CmsError> for LoadError {
     }
 }
 
-impl From<zenpnm::PnmError> for LoadError {
-    fn from(e: zenpnm::PnmError) -> Self {
+impl From<zenbitmaps::BitmapError> for LoadError {
+    fn from(e: zenbitmaps::BitmapError) -> Self {
         Self::Pnm(e)
     }
 }
@@ -328,15 +328,15 @@ fn load_jpeg(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
 }
 
 fn load_pnm(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
-    let decoded = zenpnm::decode(data, zenpnm::Unstoppable)?;
+    let decoded = zenbitmaps::decode(data, zenbitmaps::Unstoppable)?;
     let w = decoded.width as usize;
     let h = decoded.height as usize;
     let pixels = decoded.pixels();
 
     match decoded.layout {
-        zenpnm::PixelLayout::Gray8 => Ok((w, h, PixelData::Gray8(pixels.as_gray().to_vec()))),
-        zenpnm::PixelLayout::Rgb8 => Ok((w, h, PixelData::Rgb8(pixels.as_rgb().to_vec()))),
-        zenpnm::PixelLayout::Rgba8 => {
+        zenbitmaps::PixelLayout::Gray8 => Ok((w, h, PixelData::Gray8(pixels.as_gray().to_vec()))),
+        zenbitmaps::PixelLayout::Rgb8 => Ok((w, h, PixelData::Rgb8(pixels.as_rgb().to_vec()))),
+        zenbitmaps::PixelLayout::Rgba8 => {
             let rgba = pixels.as_rgba();
             if is_rgba_opaque_u8(rgba) {
                 Ok((
@@ -348,8 +348,8 @@ fn load_pnm(data: &[u8]) -> Result<(usize, usize, PixelData), LoadError> {
                 Ok((w, h, PixelData::Rgba8(rgba.to_vec())))
             }
         }
-        zenpnm::PixelLayout::Gray16 => {
-            // zenpnm provides native-endian u16
+        zenbitmaps::PixelLayout::Gray16 => {
+            // zenbitmaps provides native-endian u16
             let gray: Vec<Gray<u16>> = pixels
                 .chunks_exact(2)
                 .map(|c| Gray::new(u16::from_ne_bytes([c[0], c[1]])))
