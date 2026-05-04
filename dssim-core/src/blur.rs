@@ -33,13 +33,26 @@ mod portable {
                 out[i].write((m2 + p2) * K5_OUTER + (m1 + p1) * K5_INNER + row[i] * K5_MID);
             }
 
-            // Inner pixels: 2 <= i <= width-3 (no edge clamping)
-            for i in 2..width.saturating_sub(2) {
-                out[i].write(
-                    (row[i - 2] + row[i + 2]) * K5_OUTER
-                    + (row[i - 1] + row[i + 1]) * K5_INNER
-                    + row[i] * K5_MID,
-                );
+            // Inner pixels: 2 <= i <= width-3 (no edge clamping needed).
+            // Build five aligned sub-slices of identical length so the inner
+            // loop is a clean 5-stream pointwise op; LLVM hoists bounds checks
+            // once and emits AVX2/NEON SIMD over the body.
+            if width >= 5 {
+                let inner_len = width - 4;
+                let r_m2 = &row[..inner_len];
+                let r_m1 = &row[1..1 + inner_len];
+                let r_c  = &row[2..2 + inner_len];
+                let r_p1 = &row[3..3 + inner_len];
+                let r_p2 = &row[4..4 + inner_len];
+                let (_, out_rest) = out.split_at_mut(2);
+                let out_inner = &mut out_rest[..inner_len];
+                for j in 0..inner_len {
+                    out_inner[j].write(
+                        (r_m2[j] + r_p2[j]) * K5_OUTER
+                        + (r_m1[j] + r_p1[j]) * K5_INNER
+                        + r_c[j] * K5_MID,
+                    );
+                }
             }
 
             // Right edge pixels: clamp beyond-end indices to last
@@ -115,14 +128,31 @@ mod portable {
                 );
             }
 
-            // Inner pixels: no clamping needed
-            for i in 2..width.saturating_sub(2) {
-                let pm2 = r1[i - 2] * r2[i - 2];
-                let pm1 = r1[i - 1] * r2[i - 1];
-                let pc = r1[i] * r2[i];
-                let pp1 = r1[i + 1] * r2[i + 1];
-                let pp2 = r1[i + 2] * r2[i + 2];
-                out[i].write((pm2 + pp2) * K5_OUTER + (pm1 + pp1) * K5_INNER + pc * K5_MID);
+            // Inner pixels: no clamping needed. Build five pairs of aligned
+            // sub-slices so the inner loop is a 10-load + 5-mul + 5-add chain
+            // LLVM can vectorize cleanly.
+            if width >= 5 {
+                let inner_len = width - 4;
+                let s1_m2 = &r1[..inner_len];
+                let s1_m1 = &r1[1..1 + inner_len];
+                let s1_c  = &r1[2..2 + inner_len];
+                let s1_p1 = &r1[3..3 + inner_len];
+                let s1_p2 = &r1[4..4 + inner_len];
+                let s2_m2 = &r2[..inner_len];
+                let s2_m1 = &r2[1..1 + inner_len];
+                let s2_c  = &r2[2..2 + inner_len];
+                let s2_p1 = &r2[3..3 + inner_len];
+                let s2_p2 = &r2[4..4 + inner_len];
+                let (_, out_rest) = out.split_at_mut(2);
+                let out_inner = &mut out_rest[..inner_len];
+                for j in 0..inner_len {
+                    let pm2 = s1_m2[j] * s2_m2[j];
+                    let pm1 = s1_m1[j] * s2_m1[j];
+                    let pc  = s1_c[j]  * s2_c[j];
+                    let pp1 = s1_p1[j] * s2_p1[j];
+                    let pp2 = s1_p2[j] * s2_p2[j];
+                    out_inner[j].write((pm2 + pp2) * K5_OUTER + (pm1 + pp1) * K5_INNER + pc * K5_MID);
+                }
             }
 
             // Right edge pixels
