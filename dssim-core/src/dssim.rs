@@ -31,25 +31,14 @@ use rayon::prelude::*;
 use rgb::{RGB, RGBA};
 use std::borrow::Borrow;
 use std::mem::MaybeUninit;
-use std::ops;
 use std::ops::Deref;
 use std::sync::Arc;
-
-/// All per-channel planes the SSIM kernel needs, computed at compare time.
-/// Only `img` is stored persistently; these are transients.
-struct ChanPlanes {
-    mu1: Vec<f32>,
-    mu2: Vec<f32>,
-    sq1: Vec<f32>,
-    sq2: Vec<f32>,
-    i12: Vec<f32>,
-}
 
 #[derive(Clone)]
 struct DssimChan<T> {
     pub width: usize,
     pub height: usize,
-    pub img: Option<ImgVec<T>>,
+    pub img: ImgVec<T>,
 }
 
 /// Configuration for the comparison
@@ -121,23 +110,8 @@ impl DssimChan<f32> {
         Self {
             width,
             height,
-            img: Some(bitmap),
+            img: bitmap,
         }
-    }
-
-    /// Compute all derived planes for one channel of a comparison:
-    /// blurred means and squared-image blurs for both images, plus the
-    /// cross-blur. Five blur passes sharing one scratch buffer.
-    fn compare_planes(&self, modified: &Self, tmp: &mut [MaybeUninit<f32>]) -> ChanPlanes {
-        let img1 = self.img.as_ref().unwrap();
-        let img2 = modified.img.as_ref().unwrap();
-        let mu1 = blur::blur(img1.as_ref(), tmp).into_contiguous_buf().0;
-        let mu2 = blur::blur(img2.as_ref(), tmp).into_contiguous_buf().0;
-        let sq1 = blur::blur_mul(img1.as_ref(), img1.as_ref(), tmp);
-        let sq2 = blur::blur_mul(img2.as_ref(), img2.as_ref(), tmp);
-        // Fused multiply+blur: avoids materializing the product as a Vec.
-        let i12 = blur::blur_mul(img1.as_ref(), img2.as_ref(), tmp);
-        ChanPlanes { mu1, mu2, sq1, sq2, i12 }
     }
 }
 
@@ -261,31 +235,7 @@ impl Dssim {
         let combined_iter = self.scale_weights.iter().copied().zip(scaled_images_iter).enumerate();
 
         let res: Vec<_> = combined_iter.par_bridge().map(|(n, (weight, (modified_image_scale, original_image_scale)))| {
-            let scale_width = original_image_scale.chan[0].width;
-            let scale_height = original_image_scale.chan[0].height;
-            let pixels = scale_width * scale_height;
-
-            let ssim_map = match original_image_scale.chan.len() {
-                3 => {
-                    // Compute the per-channel moment planes (mu, sq, i12) for
-                    // L, a, b in parallel — five blur passes per channel over
-                    // disjoint memory. Each channel gets its own tmp buffer.
-                    let planes: Vec<ChanPlanes> = (0..3usize).into_par_iter().map(|c| {
-                        let mut tmp_buf: Vec<f32> = Vec::with_capacity(pixels);
-                        let tmp = &mut tmp_buf.spare_capacity_mut()[..pixels];
-                        original_image_scale.chan[c]
-                            .compare_planes(&modified_image_scale.chan[c], tmp)
-                    }).collect();
-                    Self::compare_scale_3ch(original_image_scale, modified_image_scale, &planes)
-                },
-                1 => {
-                    let mut tmp_buf: Vec<f32> = Vec::with_capacity(pixels);
-                    let tmp = &mut tmp_buf.spare_capacity_mut()[..pixels];
-                    let planes = original_image_scale.chan[0].compare_planes(&modified_image_scale.chan[0], tmp);
-                    Self::compare_scale(&planes, original_image_scale.chan[0].width, original_image_scale.chan[0].height)
-                },
-                _ => panic!(),
-            };
+            let ssim_map = Self::compare_scale_fused(original_image_scale, modified_image_scale);
 
             let sum = sum_f64(ssim_map.buf());
             let len = (ssim_map.width()*ssim_map.height()) as f64;
@@ -317,100 +267,121 @@ impl Dssim {
         (to_dssim(ssim_sum / weight_sum).into(), ssim_maps)
     }
 
-    /// 3-channel SSIM combine, scalar but unrolled across L/a/b. Reads the three
-    /// channels directly from the per-channel `mu` and `img_sq_blur` Vecs and the
-    /// three `img1_img2_blur` Vecs computed earlier in parallel — no LAB struct
-    /// interleaving, no zip-iterator overhead, and per-channel slices stay
-    /// cache-friendly. Algebraically identical to `compare_scale::<LAB>`.
-    #[inline(never)]
-    fn compare_scale_3ch(
+    /// Fused moments→SSIM for one scale, row-blocked: the horizontal
+    /// moments pass writes a 5-slot ring buffer, vertical combine produces
+    /// the five blurred moments for a single output row, and the SSIM
+    /// kernel consumes them directly — the ~15 transient planes of the
+    /// plane-at-a-time pipeline never materialize.
+    ///
+    /// Ring layout: `hring[slot][c][p]` — slot is `src_row % 5`, `c` the
+    /// channel, `p` the product index [mu1, mu2, sq1, sq2, i12].
+    fn ssim_rows(
         original: &DssimChanScale<f32>,
         modified: &DssimChanScale<f32>,
-        planes: &[ChanPlanes],
+        y0: usize,
+        y1: usize,
+        out: &mut [MaybeUninit<f32>],
+    ) {
+        let nchan = original.chan.len();
+        let width = original.chan[0].width;
+        let height = original.chan[0].height;
+        debug_assert!(original.chan.iter().chain(&modified.chan)
+            .all(|c| c.width == width && c.height == height));
+        debug_assert_eq!(out.len(), width * (y1 - y0));
+        let mut hring = vec![MaybeUninit::<f32>::uninit(); 5 * 5 * nchan * width];
+        let mut vrow = vec![MaybeUninit::<f32>::uninit(); 5 * nchan * width];
+        // src row held by each ring slot (usize::MAX = never written) —
+        // pins the assume_init invariant below in debug builds.
+        let mut slot_src = [usize::MAX; 5];
+
+        let mut hnext = y0.saturating_sub(2);
+        for (i, y) in (y0..y1).enumerate() {
+            // Produce the H-filtered rows this output row's V taps need.
+            let need = (y + 2).min(height - 1);
+            while hnext <= need {
+                let slot_seg = &mut hring[(hnext % 5) * 5 * nchan * width..][..5 * nchan * width];
+                for (chan_seg, (chan1, chan2)) in slot_seg
+                    .chunks_mut(5 * width)
+                    .zip(original.chan.iter().zip(&modified.chan))
+                {
+                    let r1 = &chan1.img.buf()[hnext * width..][..width];
+                    let r2 = &chan2.img.buf()[hnext * width..][..width];
+                    let mut rows = chan_seg.chunks_mut(width);
+                    blur::blur_moments_row(r1, r2, core::array::from_fn(|_| rows.next().unwrap()));
+                }
+                slot_src[hnext % 5] = hnext;
+                hnext += 1;
+            }
+
+            let (tap_src, edge) = blur::v5_window(y, height);
+            // `hring` slice for product `p` of channel `c` from source row `src`.
+            let hrow = |src: usize, c: usize, p: usize| -> &[MaybeUninit<f32>] {
+                &hring[((src % 5) * 5 * nchan + c * 5 + p) * width..][..width]
+            };
+            for c in 0..nchan {
+                let taps: [[&[f32]; 5]; 5] = core::array::from_fn(|p| {
+                    tap_src.map(|src| {
+                        debug_assert_eq!(slot_src[src % 5], src);
+                        // SAFETY: every source row in [y-2, y+2] (clamped)
+                        // was H-filtered into its slot above — asserted in
+                        // debug builds via slot_src.
+                        unsafe { blur::assume_init_ref(hrow(src, c, p)) }
+                    })
+                });
+                let mut outs = vrow[c * 5 * width..][..5 * width].chunks_mut(width);
+                blur::blur_moments_v5_row(taps, edge, core::array::from_fn(|_| outs.next().unwrap()));
+            }
+
+            let v = |c: usize, p: usize| -> &[f32] {
+                // SAFETY: blur_moments_v5_row wrote all `width` cells.
+                unsafe { blur::assume_init_ref(&vrow[(c * 5 + p) * width..][..width]) }
+            };
+            let out_row = &mut out[i * width..][..width];
+            if nchan == 3 {
+                let inputs = Ssim3Planes {
+                    mu1: [v(0, 0), v(1, 0), v(2, 0)],
+                    mu2: [v(0, 1), v(1, 1), v(2, 1)],
+                    sq1: [v(0, 2), v(1, 2), v(2, 2)],
+                    sq2: [v(0, 3), v(1, 3), v(2, 3)],
+                    i12: [v(0, 4), v(1, 4), v(2, 4)],
+                };
+                ssim3_range(&inputs, 0, out_row);
+            } else {
+                ssim1_range([v(0, 0), v(0, 1), v(0, 2), v(0, 3), v(0, 4)], out_row);
+            }
+        }
+    }
+
+    /// Row-fused moments→SSIM for a whole scale. Splits the map into
+    /// `FUSED_ROWS`-row blocks so the working set stays in cache.
+    #[inline(never)]
+    fn compare_scale_fused(
+        original: &DssimChanScale<f32>,
+        modified: &DssimChanScale<f32>,
     ) -> ImgVec<f32> {
+        let nchan = original.chan.len();
+        assert!(nchan == 1 || nchan == 3);
         let width = original.chan[0].width;
         let height = original.chan[0].height;
         let pixels = width * height;
-
-        let (c0, c1, c2) = (&planes[0], &planes[1], &planes[2]);
-
-        let o0_mu = &c0.mu1[..pixels];
-        let o1_mu = &c1.mu1[..pixels];
-        let o2_mu = &c2.mu1[..pixels];
-        let m0_mu = &c0.mu2[..pixels];
-        let m1_mu = &c1.mu2[..pixels];
-        let m2_mu = &c2.mu2[..pixels];
-        let o0_sq = &c0.sq1[..pixels];
-        let o1_sq = &c1.sq1[..pixels];
-        let o2_sq = &c2.sq1[..pixels];
-        let m0_sq = &c0.sq2[..pixels];
-        let m1_sq = &c1.sq2[..pixels];
-        let m2_sq = &c2.sq2[..pixels];
-        let i12_0 = &c0.i12[..pixels];
-        let i12_1 = &c1.i12[..pixels];
-        let i12_2 = &c2.i12[..pixels];
-
-        let inputs = Ssim3Planes {
-            mu1: [o0_mu, o1_mu, o2_mu],
-            mu2: [m0_mu, m1_mu, m2_mu],
-            sq1: [o0_sq, o1_sq, o2_sq],
-            sq2: [m0_sq, m1_sq, m2_sq],
-            i12: [i12_0, i12_1, i12_2],
-        };
-
         let mut map_out: Vec<f32> = Vec::with_capacity(pixels);
         let dst: &mut [MaybeUninit<f32>] = &mut map_out.spare_capacity_mut()[..pixels];
 
-        #[cfg(feature = "threads")]
-        dst.par_chunks_mut(SSIM3_CHUNK).enumerate().for_each(|(ci, out)| {
-            ssim3_range(&inputs, ci * SSIM3_CHUNK, out);
+        /// Rows per parallel task. Each block recomputes four boundary H
+        /// rows, so larger blocks do less duplicate work; 16 keeps ~64
+        /// tasks at scale 0 — enough for work stealing.
+        const FUSED_ROWS: usize = 16;
+        dst.par_chunks_mut(width * FUSED_ROWS).enumerate().for_each(|(bi, block)| {
+            let y0 = bi * FUSED_ROWS;
+            let y1 = (y0 + block.len() / width).min(height);
+            Self::ssim_rows(original, modified, y0, y1, block);
         });
-        #[cfg(not(feature = "threads"))]
-        ssim3_range(&inputs, 0, dst);
 
-        // SAFETY: every element of `dst` was written by `ssim3_range`.
+        // SAFETY: every row of `dst` was written by `ssim_rows`.
         unsafe { map_out.set_len(pixels) };
         ImgVec::new(map_out, width, height)
     }
-
-    /// Single-channel SSIM map over the compare-time planes.
-    #[inline(never)]
-    fn compare_scale(planes: &ChanPlanes, width: usize, height: usize) -> ImgVec<f32> {
-        let c1 = 0.01 * 0.01;
-        let c2 = 0.03 * 0.03;
-
-        let pixels = width * height;
-        debug_assert_eq!(planes.mu1.len(), pixels);
-        debug_assert_eq!(planes.mu2.len(), pixels);
-        debug_assert_eq!(planes.sq1.len(), pixels);
-        debug_assert_eq!(planes.sq2.len(), pixels);
-        debug_assert_eq!(planes.i12.len(), pixels);
-
-        let mu_iter = planes.mu1.par_iter().with_min_len(1<<10).copied().zip_eq(planes.mu2.par_iter().with_min_len(1<<10).copied());
-        let sq_iter = planes.sq1.par_iter().with_min_len(1<<10).copied().zip_eq(planes.sq2.par_iter().with_min_len(1<<10).copied());
-        let map_out = planes.i12.par_iter().with_min_len(1<<10).copied().zip_eq(mu_iter).zip_eq(sq_iter)
-        .map(|((i12, (mu1, mu2)), (sq1, sq2))| {
-            let mu1mu1 = mu1 * mu1;
-            let mu1mu2 = mu1 * mu2;
-            let mu2mu2 = mu2 * mu2;
-            let sigma1_sq = sq1 - mu1mu1;
-            let sigma2_sq = sq2 - mu2mu2;
-            let sigma12 = i12 - mu1mu2;
-
-            2.0f32.mul_add(mu1mu2, c1) * 2.0f32.mul_add(sigma12, c2) /
-                       ((mu1mu1 + mu2mu2 + c1) * (sigma1_sq + sigma2_sq + c2))
-        }).collect();
-
-        ImgVec::new(map_out, width, height)
-    }
 }
-
-/// Parallel chunk size for the SSIM map kernels: 4K pixels per rayon task
-/// keeps work-stealing granularity close to the old `with_min_len(1<<10)`
-/// split while giving each kernel call a run long enough to amortize the
-/// capability check.
-#[cfg(feature = "threads")]
-const SSIM3_CHUNK: usize = 1 << 12;
 
 /// Flat per-pixel inputs to the 3-channel SSIM map kernel: blurred means,
 /// blurred squared-image means, and cross-blurred products for each of the
@@ -493,6 +464,61 @@ fn ssim3_range(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
         return;
     }
     ssim3_range_base(s, base, out);
+}
+
+/// Per-pixel single-channel SSIM value — the arithmetic previously inlined
+/// in `compare_scale`'s map closure. `p` is [mu1, mu2, sq1, sq2, i12].
+#[inline(always)]
+fn ssim1_px(p: &[&[f32]; 5], i: usize) -> f32 {
+    let c1: f32 = 0.01 * 0.01;
+    let c2: f32 = 0.03 * 0.03;
+
+    let mu1 = p[0][i];
+    let mu2 = p[1][i];
+    let mu1mu1 = mu1 * mu1;
+    let mu1mu2 = mu1 * mu2;
+    let mu2mu2 = mu2 * mu2;
+    let sigma1_sq = p[2][i] - mu1mu1;
+    let sigma2_sq = p[3][i] - mu2mu2;
+    let sigma12 = p[4][i] - mu1mu2;
+
+    2.0f32.mul_add(mu1mu2, c1) * 2.0f32.mul_add(sigma12, c2)
+        / ((mu1mu1 + mu2mu2 + c1) * (sigma1_sq + sigma2_sq + c2))
+}
+
+/// `ssim1_px` over `out[k] = px(k)`. Same inline/vectorize pattern as
+/// `ssim3_range_inline`.
+#[inline(always)]
+fn ssim1_range_inline(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+    for (k, d) in out.iter_mut().enumerate() {
+        d.write(ssim1_px(&p, k));
+    }
+}
+
+#[inline(never)]
+fn ssim1_range_base(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+    ssim1_range_inline(p, out);
+}
+
+/// AVX2+FMA clone of `ssim1_range_base`; same source, vectorized wider.
+/// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2,fma")]
+fn ssim1_range_avx2(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+    ssim1_range_inline(p, out);
+}
+
+/// Runtime dispatch: AVX2+FMA kernel when detected, baseline otherwise.
+#[inline]
+fn ssim1_range(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx2_fma() {
+        // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+        unsafe { ssim1_range_avx2(p, out) };
+        return;
+    }
+    ssim1_range_base(p, out);
 }
 
 /// `Σ f64::from(x)` with 8 independent accumulators. A sequential `fold`
@@ -758,7 +784,141 @@ fn create_image_fused_parity() {
                         "scale {si} chan {ci} {what} diverged at {i}: {x} vs {y}");
                 }
             };
-            cmp(&fc.img.as_ref().unwrap().buf(), &rc.img.as_ref().unwrap().buf(), "img");
+            cmp(&fc.img.buf(), &rc.img.buf(), "img");
+        }
+    }
+}
+
+/// Bitwise parity vs upstream: `compare_scale_fused` must produce a
+/// bit-identical ssim map to the plane-materializing reference below —
+/// which is a transcription of upstream `kornelski/dssim` main's compare
+/// (`compare_scale`/`compare_scale_3ch` @ 6e45798): the five moment planes
+/// [mu1, mu2, sq1, sq2, i12] each blurred by `blur()`, then the per-pixel
+/// ssim formula. Upstream's `blur()`/`blur_mul()` are the same fused 5-tap
+/// source as ours (bitwise-identical output), and `ssim3_px`/`ssim1_px`
+/// are upstream's map-closure formulas verbatim — so bitwise equality
+/// here means the fused pipeline reproduces upstream's ssim map exactly
+/// on identical Lab planes. End-to-end score parity additionally includes
+/// tolab SIMD / aggregation reordering, bounded by `ssim_locked_values`
+/// (5e-6); a dual-build probe comparing this crate to upstream main
+/// end-to-end shows |Δscore| ≤ 4.9e-6 and |Δmap| ≤ 2.5e-4 over 60 cases.
+///
+/// Sweeps widths/heights through every V-edge regime (h<5), H edge/tail
+/// regime (w<5, non-8-mult), and FUSED_ROWS block-boundary splits
+/// (h=17, 33, 48), for 1 and 3 channels.
+#[test]
+fn fused_compare_bitexact_vs_plane_path() {
+    use imgref::*;
+
+    fn mkimg(w: usize, h: usize, seed: u32) -> ImgVec<f32> {
+        let mut s = seed;
+        ImgVec::new(
+            (0..w * h).map(|_| {
+                s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+                (s as f32) / (u32::MAX as f32)
+            }).collect(),
+            w, h,
+        )
+    }
+
+    fn mk_scale(imgs: Vec<ImgVec<f32>>) -> DssimChanScale<f32> {
+        DssimChanScale {
+            chan: imgs.into_iter().map(|img| DssimChan {
+                width: img.width(),
+                height: img.height(),
+                img,
+            }).collect(),
+        }
+    }
+
+    /// Reference: upstream main's plane-materializing compare — blur each
+    /// of the five product planes independently with `blur()`, then apply
+    /// the per-pixel ssim formula.
+    fn reference(orig: &DssimChanScale<f32>, modif: &DssimChanScale<f32>) -> Vec<f32> {
+        let w = orig.chan[0].width;
+        let h = orig.chan[0].height;
+        let px = w * h;
+        let planes: Vec<[Vec<f32>; 5]> = orig.chan.iter().zip(&modif.chan).map(|(c1, c2)| {
+            let i1 = &c1.img;
+            let i2 = &c2.img;
+            let sq1 = ImgVec::new(i1.buf().iter().map(|p| p * p).collect::<Vec<_>>(), w, h);
+            let sq2 = ImgVec::new(i2.buf().iter().map(|p| p * p).collect::<Vec<_>>(), w, h);
+            let mul = ImgVec::new(
+                i1.buf().iter().zip(i2.buf()).map(|(a, b)| a * b).collect::<Vec<_>>(),
+                w, h,
+            );
+            let mut tmp = vec![MaybeUninit::uninit(); px];
+            [
+                blur::blur(i1.as_ref(), &mut tmp).buf().to_vec(),
+                blur::blur(i2.as_ref(), &mut tmp).buf().to_vec(),
+                blur::blur(sq1.as_ref(), &mut tmp).buf().to_vec(),
+                blur::blur(sq2.as_ref(), &mut tmp).buf().to_vec(),
+                blur::blur(mul.as_ref(), &mut tmp).buf().to_vec(),
+            ]
+        }).collect();
+        if orig.chan.len() == 3 {
+            let s = Ssim3Planes {
+                mu1: [&planes[0][0], &planes[1][0], &planes[2][0]],
+                mu2: [&planes[0][1], &planes[1][1], &planes[2][1]],
+                sq1: [&planes[0][2], &planes[1][2], &planes[2][2]],
+                sq2: [&planes[0][3], &planes[1][3], &planes[2][3]],
+                i12: [&planes[0][4], &planes[1][4], &planes[2][4]],
+            };
+            (0..px).map(|k| ssim3_px(&s, k)).collect()
+        } else {
+            let p: [&[f32]; 5] =
+                [&planes[0][0], &planes[0][1], &planes[0][2], &planes[0][3], &planes[0][4]];
+            (0..px).map(|k| ssim1_px(&p, k)).collect()
+        }
+    }
+
+    let shapes = [
+        (1usize, 1usize), (2, 2), (3, 4), (4, 3), (5, 5), (7, 6), (8, 17),
+        (9, 15), (1, 33), (16, 16), (17, 32), (31, 33), (4, 48), (64, 17),
+        (33, 40), (255, 15), (64, 64), (17, 1),
+    ];
+    for &(w, h) in &shapes {
+        for nchan in [1usize, 3] {
+            let orig = mk_scale((0..nchan).map(|c| mkimg(w, h, 0x1111 + c as u32)).collect());
+            let modif = mk_scale((0..nchan).map(|c| mkimg(w, h, 0x9999 + c as u32)).collect());
+            let fused = Dssim::compare_scale_fused(&orig, &modif);
+            let expected = reference(&orig, &modif);
+            assert_eq!(
+                fused.buf(),
+                expected.as_slice(),
+                "fused compare diverged at {w}x{h} nchan={nchan}",
+            );
+        }
+    }
+}
+
+/// Identical images must yield ssim == 1.0 exactly through the fused path
+/// (the same invariant `poison` checks at the API level).
+#[test]
+fn fused_compare_identical_is_one() {
+    use imgref::*;
+    fn mk(w: usize, h: usize, seed: u32, nchan: usize) -> DssimChanScale<f32> {
+        let mut s = seed;
+        DssimChanScale {
+            chan: (0..nchan).map(|_| {
+                ImgVec::new(
+                    (0..w * h).map(|_| {
+                        s ^= s << 13; s ^= s >> 17; s ^= s << 5;
+                        (s as f32) / (u32::MAX as f32)
+                    }).collect::<Vec<_>>(),
+                    w, h,
+                )
+            }).map(|img| DssimChan { width: w, height: h, img }).collect(),
+        }
+    }
+    for &(w, h) in &[(1usize, 1usize), (5, 5), (17, 33), (64, 40)] {
+        for nchan in [1usize, 3] {
+            let scale = mk(w, h, 0x5EED + nchan as u32, nchan);
+            let fused = Dssim::compare_scale_fused(&scale, &scale);
+            assert!(
+                fused.buf().iter().all(|&v| v == 1.0),
+                "{w}x{h} nchan={nchan}: identical-image ssim != 1.0",
+            );
         }
     }
 }

@@ -233,3 +233,82 @@
             }
         }
     }
+
+    /// `v5_window` produces the same clamped tap indices and edge kinds the
+    /// old inline `blur_v5` code used — pinned as an explicit table so a
+    /// regression in the shared row-selection logic fails here, not in
+    /// downstream map diffs.
+    #[test]
+    fn v5_window_table() {
+        use super::V5Edge::{Bottom, None as Mid, Top};
+        for (h, y, exp_taps, exp_edge) in [
+            (1usize, 0usize, [0, 0, 0, 0, 0], Top),
+            (2, 0, [0, 0, 0, 1, 1], Top),
+            (2, 1, [0, 0, 1, 1, 1], Bottom),
+            (3, 0, [0, 0, 0, 1, 2], Top),
+            (3, 1, [0, 0, 1, 2, 2], Mid),
+            (3, 2, [0, 1, 2, 2, 2], Bottom),
+            (4, 1, [0, 0, 1, 2, 3], Mid),
+            (4, 2, [0, 1, 2, 3, 3], Mid),
+            (5, 2, [0, 1, 2, 3, 4], Mid),
+            (9, 0, [0, 0, 0, 1, 2], Top),
+            (9, 1, [0, 0, 1, 2, 3], Mid),
+            (9, 6, [4, 5, 6, 7, 8], Mid),
+            (9, 7, [5, 6, 7, 8, 8], Mid),
+            (9, 8, [6, 7, 8, 8, 8], Bottom),
+        ] {
+            let (taps, edge) = super::v5_window(y, h);
+            assert_eq!(taps, exp_taps, "h={h} y={y} taps");
+            assert_eq!(edge, exp_edge, "h={h} y={y} edge");
+        }
+    }
+
+    /// `blur_moments_row` must equal an independent per-pixel clamped
+    /// 5-tap reference for each of the five products — catches tap-offset
+    /// and lane-indexing bugs in the fused kernel (bitwise: the reference
+    /// uses the identical expression tree).
+    #[test]
+    fn moments_row_matches_scalar_reference() {
+        use super::{K5_EDGE_CENTER, K5_EDGE_FAR, K5_EDGE_NEAR, K5_INNER, K5_MID, K5_OUTER};
+
+        let ref_row = |prod: &dyn Fn(usize) -> f32, w: usize| -> Vec<f32> {
+            let last = w - 1;
+            let p = |i: isize| prod((i.max(0) as usize).min(last));
+            (0..w).map(|x| {
+                let x = x as isize;
+                if x == 0 {
+                    K5_EDGE_CENTER * p(0) + K5_EDGE_NEAR * p(1) + K5_EDGE_FAR * p(2)
+                } else if x == last as isize && w >= 2 {
+                    K5_EDGE_FAR * p(x - 2) + K5_EDGE_NEAR * p(x - 1) + K5_EDGE_CENTER * p(x)
+                } else if x == 1 && w >= 3 {
+                    (p(0) + p(3)) * K5_OUTER + (p(0) + p(2)) * K5_INNER + p(1) * K5_MID
+                } else if x == last as isize - 1 && w >= 4 {
+                    (p(x - 2) + p(x + 2)) * K5_OUTER + (p(x - 1) + p(x + 1)) * K5_INNER + p(x) * K5_MID
+                } else {
+                    (p(x - 2) + p(x + 2)) * K5_OUTER + (p(x - 1) + p(x + 1)) * K5_INNER + p(x) * K5_MID
+                }
+            }).collect()
+        };
+
+        for w in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 16, 17, 31, 64] {
+            let mut s = 0xABCD_1234u32;
+            let r1: Vec<f32> = (0..w).map(|_| (xorshift32(&mut s) as f32) / (u32::MAX as f32)).collect();
+            let r2: Vec<f32> = (0..w).map(|_| (xorshift32(&mut s) as f32) / (u32::MAX as f32)).collect();
+            let mut bufs: [Vec<MaybeUninit<f32>>; 5] =
+                core::array::from_fn(|_| vec![MaybeUninit::uninit(); w]);
+            super::blur_moments_row(&r1, &r2, bufs.each_mut().map(|b| &mut b[..]));
+            let prods: [Box<dyn Fn(usize) -> f32>; 5] = [
+                Box::new(|i| r1[i]),
+                Box::new(|i| r2[i]),
+                Box::new(|i| r1[i] * r1[i]),
+                Box::new(|i| r2[i] * r2[i]),
+                Box::new(|i| r1[i] * r2[i]),
+            ];
+            for (p, prod) in prods.iter().enumerate() {
+                let expected = ref_row(&**prod, w);
+                // SAFETY: blur_moments_row wrote all w cells of each row.
+                let got: &[f32] = unsafe { super::assume_init_ref(&bufs[p]) };
+                assert_eq!(got, expected.as_slice(), "w={w} product {p}");
+            }
+        }
+    }

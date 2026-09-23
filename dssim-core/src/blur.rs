@@ -49,30 +49,9 @@ mod portable {
         }
     }
 
-    /// Interior row pass of `blur_h5_mul`: 5-tap over the element-wise
-    /// product of `r1` and `r2` (each ordered [-2, -1, 0, +1, +2]).
-    #[inline(always)]
-    fn blur5_mul_inner_inline(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
-        let [a_m2, a_m1, a_c, a_p1, a_p2] = r1;
-        let [b_m2, b_m1, b_c, b_p1, b_p2] = r2;
-        for j in 0..out.len() {
-            let pm2 = a_m2[j] * b_m2[j];
-            let pm1 = a_m1[j] * b_m1[j];
-            let pc  = a_c[j]  * b_c[j];
-            let pp1 = a_p1[j] * b_p1[j];
-            let pp2 = a_p2[j] * b_p2[j];
-            out[j].write((pm2 + pp2) * K5_OUTER + (pm1 + pp1) * K5_INNER + pc * K5_MID);
-        }
-    }
-
     #[inline(never)]
     fn blur5_inner_base(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
         blur5_inner_inline(r, out);
-    }
-
-    #[inline(never)]
-    fn blur5_mul_inner_base(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
-        blur5_mul_inner_inline(r1, r2, out);
     }
 
     /// AVX2+FMA clone of `blur5_inner_base`; same source, vectorized wider.
@@ -82,15 +61,6 @@ mod portable {
     #[target_feature(enable = "avx2,fma")]
     fn blur5_inner_avx2(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
         blur5_inner_inline(r, out);
-    }
-
-    /// AVX2+FMA clone of `blur5_mul_inner_base`; same source, vectorized wider.
-    /// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
-    #[cfg(target_arch = "x86_64")]
-    #[inline(never)]
-    #[target_feature(enable = "avx2,fma")]
-    fn blur5_mul_inner_avx2(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
-        blur5_mul_inner_inline(r1, r2, out);
     }
 
     /// Runtime dispatch, resolved once per row — a cached atomic load is
@@ -107,66 +77,16 @@ mod portable {
         blur5_inner_base(r, out);
     }
 
-    /// Runtime dispatch for the fused multiply row pass.
-    #[inline]
-    fn blur5_mul_inner(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
-        #[cfg(target_arch = "x86_64")]
-        if crate::caps::has_avx2_fma() {
-            // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
-            unsafe { blur5_mul_inner_avx2(r1, r2, out) };
-            return;
-        }
-        blur5_mul_inner_base(r1, r2, out);
-    }
-
     /// Horizontal 5-tap blur, bit-equivalent to two sequential clamped 1D
-    /// 3-tap blurs. Edges (`j=0` and `j=w-1`) use the legacy-equivalent
-    /// 3-coefficient form derived from H1·H1 clamping; `j=1` and `j=w-2`
-    /// already match H1·H1 with the plain clamped 5-tap.
+    /// 3-tap blurs. Edge columns use `h5_edges` (the same legacy-equivalent
+    /// clamped-tap math the fused moments pass applies per product).
     fn blur_h5(src: &[f32], dst: &mut [MaybeUninit<f32>], width: usize, height: usize, src_stride: usize) {
         debug_assert!(width >= 1);
-        let last = width - 1;
         for y in 0..height {
             let row = &src[y * src_stride..][..width];
             let out = &mut dst[y * width..][..width];
 
-            // Edge: j=0. Reads p[0], p[min(1, last)], p[min(2, last)] with
-            // the H1·H1-derived weights. Works for any width ≥ 1.
-            let p0 = row[0];
-            let p1 = row[1.min(last)];
-            let p2 = row[2.min(last)];
-            out[0].write(K5_EDGE_CENTER * p0 + K5_EDGE_NEAR * p1 + K5_EDGE_FAR * p2);
-
-            // Edge: j=w-1 (mirror of j=0). Skipped when width==1 because
-            // j=0 already covered it.
-            if width >= 2 {
-                let pl = row[last];
-                let pl1 = row[last - 1];
-                let pl2 = row[last.saturating_sub(2)];
-                out[last].write(K5_EDGE_FAR * pl2 + K5_EDGE_NEAR * pl1 + K5_EDGE_CENTER * pl);
-            }
-
-            // Near-edge: j=1 — plain clamped 5-tap (matches H1·H1).
-            if width >= 3 {
-                // i-2 → 0, i-1 → 0, i = 1, i+1 = 2, i+2 = min(3, last)
-                let m2 = row[0];
-                let m1 = row[0];
-                let c = row[1];
-                let p1n = row[2.min(last)];
-                let p2n = row[3.min(last)];
-                out[1].write((m2 + p2n) * K5_OUTER + (m1 + p1n) * K5_INNER + c * K5_MID);
-            }
-
-            // Near-edge: j=w-2 — plain clamped 5-tap (matches H1·H1).
-            if width >= 4 {
-                let i = last - 1;
-                let m2 = row[i - 2];
-                let m1 = row[i - 1];
-                let c = row[i];
-                let p1n = row[i + 1];           // = last
-                let p2n = row[(i + 2).min(last)]; // i+2 == last+1 → clamp to last
-                out[i].write((m2 + p2n) * K5_OUTER + (m1 + p1n) * K5_INNER + c * K5_MID);
-            }
+            h5_edges(row, row, |a, _b, i| a[i], out);
 
             // Interior: j ∈ [2, w-2). Five aligned sub-slices so LLVM hoists
             // bounds checks once per row and emits AVX2/NEON SIMD over the body.
@@ -184,175 +104,240 @@ mod portable {
         }
     }
 
+    /// Clamped vertical tap indices [-2,-1,0,+1,+2] for output row `y` and
+    /// the matching edge kind — the single source of truth for `blur_v5`'s
+    /// row selection, shared with the fused moments path.
+    pub(crate) fn v5_window(y: usize, height: usize) -> ([usize; 5], V5Edge) {
+        let last = height - 1;
+        let taps = [
+            y.saturating_sub(2),
+            y.saturating_sub(1),
+            y,
+            (y + 1).min(last),
+            (y + 2).min(last),
+        ];
+        let edge = if y == 0 {
+            V5Edge::Top
+        } else if y == last {
+            V5Edge::Bottom
+        } else {
+            V5Edge::None
+        };
+        (taps, edge)
+    }
+
+    /// One output row of the vertical 5-tap combine. `taps` are the five
+    /// source rows at clamped indices [-2,-1,0,+1,+2] around the output
+    /// row; `edge` picks the H1·H1-derived 3-coefficient form at y=0 and
+    /// y=height-1, plain 5-tap everywhere else.
+    ///
+    /// The `match` sits inside the loop: `edge` is loop-invariant, so
+    /// LLVM unswitches it — one source loop, three specialized codegen
+    /// paths (the interior one vectorized under AVX2+FMA).
+    #[inline(always)]
+    fn v5_combine_row_inline(taps: [&[f32]; 5], edge: V5Edge, out: &mut [MaybeUninit<f32>]) {
+        let [m2, m1, c, p1, p2] = taps;
+        for (x, o) in out.iter_mut().enumerate() {
+            o.write(match edge {
+                V5Edge::None => {
+                    (m2[x] + p2[x]) * K5_OUTER + (m1[x] + p1[x]) * K5_INNER + c[x] * K5_MID
+                }
+                V5Edge::Top => {
+                    K5_EDGE_CENTER * c[x] + K5_EDGE_NEAR * p1[x] + K5_EDGE_FAR * p2[x]
+                }
+                V5Edge::Bottom => {
+                    K5_EDGE_FAR * m2[x] + K5_EDGE_NEAR * m1[x] + K5_EDGE_CENTER * c[x]
+                }
+            });
+        }
+    }
+
+    #[inline(never)]
+    fn v5_combine_row_base(taps: [&[f32]; 5], edge: V5Edge, out: &mut [MaybeUninit<f32>]) {
+        v5_combine_row_inline(taps, edge, out);
+    }
+
+    /// AVX2+FMA clone of `v5_combine_row_base`; same source, vectorized
+    /// wider. SAFETY: call only when `caps::has_avx2_fma()` has confirmed
+    /// support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma")]
+    fn v5_combine_row_avx2(taps: [&[f32]; 5], edge: V5Edge, out: &mut [MaybeUninit<f32>]) {
+        v5_combine_row_inline(taps, edge, out);
+    }
+
+    /// Runtime dispatch, resolved once per row.
+    #[inline]
+    fn v5_combine_row(taps: [&[f32]; 5], edge: V5Edge, out: &mut [MaybeUninit<f32>]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx2_fma() {
+            // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+            unsafe { v5_combine_row_avx2(taps, edge, out) };
+            return;
+        }
+        v5_combine_row_base(taps, edge, out);
+    }
+
     /// Vertical 5-tap blur, bit-equivalent to two sequential clamped 1D
-    /// 3-tap blurs. Same edge-handling structure as `blur_h5`. `src` must
-    /// be tightly packed (stride == width).
+    /// 3-tap blurs. `src` must be tightly packed (stride == width).
     fn blur_v5(src: &[f32], dst: &mut [MaybeUninit<f32>], width: usize, height: usize, dst_stride: usize) {
         debug_assert!(height >= 1);
-        let last_y = height - 1;
-
-        // Helper: row slice at index y (clamped within [0, last_y]).
-        let row = |y: usize| &src[y * width..][..width];
-
-        // Edge: y=0 — H1·H1-derived 3-coefficient form (vertical).
-        {
-            let r0 = row(0);
-            let r1 = row(1.min(last_y));
-            let r2 = row(2.min(last_y));
-            let out = &mut dst[..width];
-            for x in 0..width {
-                out[x].write(
-                    K5_EDGE_CENTER * r0[x] + K5_EDGE_NEAR * r1[x] + K5_EDGE_FAR * r2[x],
-                );
-            }
+        for y in 0..height {
+            let (idx, edge) = v5_window(y, height);
+            let taps = idx.map(|i| &src[i * width..][..width]);
+            v5_combine_row(taps, edge, &mut dst[y * dst_stride..][..width]);
         }
+    }
 
-        // Edge: y=h-1 (mirror of y=0).
-        if height >= 2 {
-            let rl = row(last_y);
-            let rl1 = row(last_y - 1);
-            let rl2 = row(last_y.saturating_sub(2));
-            let out = &mut dst[last_y * dst_stride..][..width];
-            for x in 0..width {
-                out[x].write(
-                    K5_EDGE_FAR * rl2[x] + K5_EDGE_NEAR * rl1[x] + K5_EDGE_CENTER * rl[x],
-                );
-            }
+    /// Scalar edge columns shared by all moment outputs: the same
+    /// clamped-tap math as `blur_h5`, applied to an arbitrary per-pixel
+    /// product of the two input rows. Writes j ∈ {0, 1, w-2, w-1}
+    /// (deduplicated for tiny widths) and leaves the interior untouched.
+    #[inline(always)]
+    fn h5_edges(
+        r1: &[f32],
+        r2: &[f32],
+        prod: impl Fn(&[f32], &[f32], usize) -> f32,
+        out: &mut [MaybeUninit<f32>],
+    ) {
+        let width = out.len();
+        let last = width - 1;
+        let p = |i: usize| prod(r1, r2, i);
+        out[0].write(K5_EDGE_CENTER * p(0) + K5_EDGE_NEAR * p(1.min(last)) + K5_EDGE_FAR * p(2.min(last)));
+        if width >= 2 {
+            out[last].write(K5_EDGE_FAR * p(last.saturating_sub(2)) + K5_EDGE_NEAR * p(last - 1) + K5_EDGE_CENTER * p(last));
         }
-
-        // Near-edge: y=1 — plain clamped 5-tap.
-        if height >= 3 {
-            let rm = row(0);
-            let rc = row(1);
-            let rp1 = row(2.min(last_y));
-            let rp2 = row(3.min(last_y));
-            let out = &mut dst[dst_stride..][..width];
-            for x in 0..width {
-                // m2 and m1 both clamp to row 0.
-                out[x].write(
-                    (rm[x] + rp2[x]) * K5_OUTER
-                    + (rm[x] + rp1[x]) * K5_INNER
-                    + rc[x] * K5_MID,
-                );
-            }
+        if width >= 3 {
+            out[1].write((p(0) + p(3.min(last))) * K5_OUTER + (p(0) + p(2.min(last))) * K5_INNER + p(1) * K5_MID);
         }
-
-        // Near-edge: y=h-2 — plain clamped 5-tap.
-        if height >= 4 {
-            let y = last_y - 1;
-            let rm2 = row(y - 2);
-            let rm1 = row(y - 1);
-            let rc = row(y);
-            let rp1 = row(y + 1);                // = last_y
-            let rp2 = row((y + 2).min(last_y));  // y+2 == last_y+1 → clamp to last_y
-            let out = &mut dst[y * dst_stride..][..width];
-            for x in 0..width {
-                out[x].write(
-                    (rm2[x] + rp2[x]) * K5_OUTER
-                    + (rm1[x] + rp1[x]) * K5_INNER
-                    + rc[x] * K5_MID,
-                );
-            }
+        if width >= 4 {
+            let i = last - 1;
+            out[i].write((p(i - 2) + p((i + 2).min(last))) * K5_OUTER + (p(i - 1) + p(i + 1)) * K5_INNER + p(i) * K5_MID);
         }
+    }
 
-        // Interior: y ∈ [2, h-2). Plain 5-tap; this is the SIMD-friendly hot loop.
-        if height >= 5 {
-            for y in 2..height - 2 {
-                let rm2 = row(y - 2);
-                let rm1 = row(y - 1);
-                let rc  = row(y);
-                let rp1 = row(y + 1);
-                let rp2 = row(y + 2);
-                blur5_inner([rm2, rm1, rc, rp1, rp2], &mut dst[y * dst_stride..][..width]);
+    /// One row of the fused horizontal moments pass: writes h5(i1), h5(i2),
+    /// h5(i1*i1), h5(i2*i2), h5(i1*i2) for a single source row pair.
+    /// Six row-reads become two. `rows[p]` must have `r1.len()` cells.
+    ///
+    /// `#[inline(always)]` so the AVX2+FMA wrapper re-vectorizes this same
+    /// body under its target features — five shifted sub-slices per input
+    /// row give LLVM the same unit-stride stencil it vectorizes in
+    /// `blur5_inner_inline`.
+    #[inline(always)]
+    fn blur_h5_moments_row_inline(
+        r1: &[f32],
+        r2: &[f32],
+        rows: [&mut [MaybeUninit<f32>]; 5],
+    ) {
+        let width = r1.len();
+        debug_assert!(width >= 1);
+        let inner = width.saturating_sub(4);
+        let mut rows = rows;
+
+        // Edges: same clamped-tap math as blur_h5, one per product.
+        h5_edges(r1, r2, |a, _b, i| a[i], rows[0]);
+        h5_edges(r1, r2, |_a, b, i| b[i], rows[1]);
+        h5_edges(r1, r2, |a, _b, i| a[i] * a[i], rows[2]);
+        h5_edges(r1, r2, |_a, b, i| b[i] * b[i], rows[3]);
+        h5_edges(r1, r2, |a, b, i| a[i] * b[i], rows[4]);
+
+        if inner > 0 {
+            // Interior x ∈ [2, w-2): tap k of output x+k... i.e. output
+            // index k+2 reads input offsets k..k+4 — five aligned
+            // sub-slices like `blur_h5` builds for `blur5_inner`.
+            let a = [
+                &r1[..inner],
+                &r1[1..=inner],
+                &r1[2..2 + inner],
+                &r1[3..3 + inner],
+                &r1[4..4 + inner],
+            ];
+            let b = [
+                &r2[..inner],
+                &r2[1..=inner],
+                &r2[2..2 + inner],
+                &r2[3..3 + inner],
+                &r2[4..4 + inner],
+            ];
+            let [d0, d1, d2, d3, d4] = rows.each_mut().map(|r| &mut r[2..2 + inner]);
+            for k in 0..inner {
+                let (x0, x1, x2, x3, x4) = (a[0][k], a[1][k], a[2][k], a[3][k], a[4][k]);
+                let (y0, y1, y2, y3, y4) = (b[0][k], b[1][k], b[2][k], b[3][k], b[4][k]);
+                d0[k].write((x0 + x4) * K5_OUTER + (x1 + x3) * K5_INNER + x2 * K5_MID);
+                d1[k].write((y0 + y4) * K5_OUTER + (y1 + y3) * K5_INNER + y2 * K5_MID);
+                let (p0, p1, p2, p3, p4) = (x0 * x0, x1 * x1, x2 * x2, x3 * x3, x4 * x4);
+                d2[k].write((p0 + p4) * K5_OUTER + (p1 + p3) * K5_INNER + p2 * K5_MID);
+                let (q0, q1, q2, q3, q4) = (y0 * y0, y1 * y1, y2 * y2, y3 * y3, y4 * y4);
+                d3[k].write((q0 + q4) * K5_OUTER + (q1 + q3) * K5_INNER + q2 * K5_MID);
+                let (c0, c1, c2, c3, c4) = (x0 * y0, x1 * y1, x2 * y2, x3 * y3, x4 * y4);
+                d4[k].write((c0 + c4) * K5_OUTER + (c1 + c3) * K5_INNER + c2 * K5_MID);
             }
         }
     }
 
-    /// Horizontal 5-tap blur with fused element-wise multiply, bit-equivalent
-    /// to clamped H1·H1 applied to `src1 * src2`. Same edge-handling structure
-    /// as `blur_h5`.
-    #[allow(clippy::too_many_arguments)]
-    fn blur_h5_mul(
-        src1: &[f32],
-        src2: &[f32],
-        dst: &mut [MaybeUninit<f32>],
-        width: usize,
-        height: usize,
-        stride1: usize,
-        stride2: usize,
+    #[inline(never)]
+    fn blur_h5_moments_row_base(r1: &[f32], r2: &[f32], rows: [&mut [MaybeUninit<f32>]; 5]) {
+        blur_h5_moments_row_inline(r1, r2, rows);
+    }
+
+    /// AVX2+FMA clone of `blur_h5_moments_row_base`; same source, vectorized
+    /// wider. SAFETY: call only when `caps::has_avx2_fma()` has confirmed
+    /// support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma")]
+    fn blur_h5_moments_row_avx2(r1: &[f32], r2: &[f32], rows: [&mut [MaybeUninit<f32>]; 5]) {
+        blur_h5_moments_row_inline(r1, r2, rows);
+    }
+
+    /// Row-level dispatch for the fused horizontal moments pass.
+    /// `rows[p]` gets the horizontal blur of `r1`, `r2`, `r1*r1`,
+    /// `r2*r2`, `r1*r2` respectively.
+    pub fn blur_moments_row(r1: &[f32], r2: &[f32], rows: [&mut [MaybeUninit<f32>]; 5]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx2_fma() {
+            // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+            unsafe { blur_h5_moments_row_avx2(r1, r2, rows) };
+            return;
+        }
+        blur_h5_moments_row_base(r1, r2, rows);
+    }
+
+    /// Border kind for `blur_moments_v5_row`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub enum V5Edge {
+        /// Output row 0: 3-coefficient edge form over the last three taps.
+        Top,
+        /// Output row height-1: mirrored 3-coefficient edge form.
+        Bottom,
+        /// Interior or near-edge row: plain clamped 5-tap.
+        None,
+    }
+
+    /// Vertical 5-tap combine producing one output row for all five moment
+    /// planes at once. `taps[p]` = the five H-filtered rows for product `p`
+    /// at clamped indices [-2,-1,0,+1,+2] around the output row — i.e. the
+    /// same row selection `v5_window` produces for `blur_v5`.
+    pub fn blur_moments_v5_row(
+        taps: [[&[f32]; 5]; 5],
+        edge: V5Edge,
+        mut out: [&mut [MaybeUninit<f32>]; 5],
     ) {
-        debug_assert!(width >= 1);
-        let last = width - 1;
-        for y in 0..height {
-            let r1 = &src1[y * stride1..][..width];
-            let r2 = &src2[y * stride2..][..width];
-            let out = &mut dst[y * width..][..width];
-            let prod = |i: usize| r1[i] * r2[i];
-
-            // Edge: j=0. H1·H1-derived 3-coefficient form on q[i] = r1[i]·r2[i].
-            let q0 = prod(0);
-            let q1 = prod(1.min(last));
-            let q2 = prod(2.min(last));
-            out[0].write(K5_EDGE_CENTER * q0 + K5_EDGE_NEAR * q1 + K5_EDGE_FAR * q2);
-
-            // Edge: j=w-1.
-            if width >= 2 {
-                let ql = prod(last);
-                let ql1 = prod(last - 1);
-                let ql2 = prod(last.saturating_sub(2));
-                out[last].write(K5_EDGE_FAR * ql2 + K5_EDGE_NEAR * ql1 + K5_EDGE_CENTER * ql);
-            }
-
-            // Near-edge: j=1.
-            if width >= 3 {
-                let m2 = prod(0);
-                let m1 = prod(0);
-                let c = prod(1);
-                let p1n = prod(2.min(last));
-                let p2n = prod(3.min(last));
-                out[1].write((m2 + p2n) * K5_OUTER + (m1 + p1n) * K5_INNER + c * K5_MID);
-            }
-
-            // Near-edge: j=w-2.
-            if width >= 4 {
-                let i = last - 1;
-                let m2 = prod(i - 2);
-                let m1 = prod(i - 1);
-                let c = prod(i);
-                let p1n = prod(i + 1);
-                let p2n = prod((i + 2).min(last));
-                out[i].write((m2 + p2n) * K5_OUTER + (m1 + p1n) * K5_INNER + c * K5_MID);
-            }
-
-            // Interior: j ∈ [2, w-2). Build five pairs of aligned sub-slices.
-            if width >= 5 {
-                let inner_len = width - 4;
-                let s1 = [
-                    &r1[..inner_len],
-                    &r1[1..=inner_len],
-                    &r1[2..2 + inner_len],
-                    &r1[3..3 + inner_len],
-                    &r1[4..4 + inner_len],
-                ];
-                let s2 = [
-                    &r2[..inner_len],
-                    &r2[1..=inner_len],
-                    &r2[2..2 + inner_len],
-                    &r2[3..3 + inner_len],
-                    &r2[4..4 + inner_len],
-                ];
-                blur5_mul_inner(s1, s2, &mut out[2..2 + inner_len]);
-            }
+        for (p, o) in out.iter_mut().enumerate() {
+            v5_combine_row(taps[p], edge, o);
         }
     }
 
     /// Promote `&mut [MaybeUninit<f32>]` to `&[f32]` once every cell is written.
     /// SAFETY: every cell of `slice` must have been initialized.
-    unsafe fn assume_init_ref(slice: &[MaybeUninit<f32>]) -> &[f32] {
+    pub(crate) unsafe fn assume_init_ref(slice: &[MaybeUninit<f32>]) -> &[f32] {
         // SAFETY: f32 and MaybeUninit<f32> have identical layout; caller guarantees init.
         unsafe { std::slice::from_raw_parts(slice.as_ptr().cast::<f32>(), slice.len()) }
     }
 
+    #[cfg(test)]
     pub fn blur(src: ImgRef<'_, f32>, tmp: &mut [MaybeUninit<f32>]) -> ImgVec<f32> {
         let width = src.width();
         let height = src.height();
@@ -407,42 +392,7 @@ mod portable {
         blur_v5(tmp_init, dst_uninit, width, height, stride);
     }
 
-    /// Blur the element-wise product of two images: `blur(src1 * src2)`.
-    /// Fuses the multiply into the horizontal pass, then does a single vertical pass.
-    pub fn blur_mul(src1: ImgRef<'_, f32>, src2: ImgRef<'_, f32>, tmp: &mut [MaybeUninit<f32>]) -> Vec<f32> {
-        let width = src1.width();
-        let height = src1.height();
-        debug_assert_eq!(width, src2.width());
-        debug_assert_eq!(height, src2.height());
-        assert!(width > 0 && width < 1 << 24);
-        assert!(height > 0 && height < 1 << 24);
-
-        let pixels = width * height;
-        assert!(tmp.len() >= pixels);
-        let tmp = &mut tmp[..pixels];
-
-        let mut dst_vec: Vec<f32> = Vec::with_capacity(pixels);
-        let dst_uninit: &mut [MaybeUninit<f32>] = &mut dst_vec.spare_capacity_mut()[..pixels];
-
-        blur_h5_mul(
-            src1.buf(),
-            src2.buf(),
-            tmp,
-            width,
-            height,
-            src1.stride(),
-            src2.stride(),
-        );
-        // SAFETY: blur_h5_mul wrote every cell of tmp[..pixels].
-        let tmp_init: &[f32] = unsafe { assume_init_ref(tmp) };
-        blur_v5(tmp_init, dst_uninit, width, height, width);
-
-        // SAFETY: blur_v5 wrote every cell.
-        unsafe { dst_vec.set_len(pixels); }
-        dst_vec
-    }
-
-    /// Scalar vs AVX2 parity for the dispatched interior kernels, over an
+    /// Scalar vs AVX2 parity for the dispatched interior kernel, over an
     /// odd-length range so the SIMD tail is exercised.
     #[test]
     #[cfg(target_arch = "x86_64")]
@@ -454,31 +404,20 @@ mod portable {
         let src: Vec<f32> = (0..n + 4)
             .map(|i| ((i as u32).wrapping_mul(747_796_405) >> 8) as f32 / 16_777_216.0)
             .collect();
-        let src2: Vec<f32> = src.iter().map(|x| 1.0 - x).collect();
         let r = [
             &src[..n], &src[1..=n], &src[2..2 + n], &src[3..3 + n], &src[4..4 + n],
         ];
-        let s = [
-            &src2[..n], &src2[1..=n], &src2[2..2 + n], &src2[3..3 + n], &src2[4..4 + n],
-        ];
         let mut base = vec![MaybeUninit::<f32>::uninit(); n];
         let mut avx2 = vec![MaybeUninit::<f32>::uninit(); n];
-        let mut base_mul = vec![MaybeUninit::<f32>::uninit(); n];
-        let mut avx2_mul = vec![MaybeUninit::<f32>::uninit(); n];
         blur5_inner_base(r, &mut base);
-        blur5_mul_inner_base(r, s, &mut base_mul);
         // SAFETY: has_avx2_fma() confirmed support above.
         unsafe {
             blur5_inner_avx2(r, &mut avx2);
-            blur5_mul_inner_avx2(r, s, &mut avx2_mul);
         }
         for j in 0..n {
             let (a, b) = unsafe { (base[j].assume_init(), avx2[j].assume_init()) };
             assert!((f64::from(a) - f64::from(b)).abs() < 1e-6,
                 "blur5_inner diverged at {j}: base={a} avx2={b}");
-            let (a, b) = unsafe { (base_mul[j].assume_init(), avx2_mul[j].assume_init()) };
-            assert!((f64::from(a) - f64::from(b)).abs() < 1e-6,
-                "blur5_mul_inner diverged at {j}: base={a} avx2={b}");
         }
     }
 }
