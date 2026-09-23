@@ -35,8 +35,14 @@ use std::ops;
 use std::ops::Deref;
 use std::sync::Arc;
 
-trait Channable<T, I> {
-    fn img1_img2_blur(&self, modified: &Self, tmp: &mut [MaybeUninit<I>]) -> Vec<T>;
+/// All per-channel planes the SSIM kernel needs, computed at compare time.
+/// Only `img` is stored persistently; these are transients.
+struct ChanPlanes {
+    mu1: Vec<f32>,
+    mu2: Vec<f32>,
+    sq1: Vec<f32>,
+    sq2: Vec<f32>,
+    i12: Vec<f32>,
 }
 
 #[derive(Clone)]
@@ -44,9 +50,6 @@ struct DssimChan<T> {
     pub width: usize,
     pub height: usize,
     pub img: Option<ImgVec<T>>,
-    pub mu: Vec<T>,
-    pub img_sq_blur: Vec<T>,
-    pub is_chroma: bool,
 }
 
 /// Configuration for the comparison
@@ -100,51 +103,41 @@ pub fn new() -> Dssim {
 }
 
 impl DssimChan<f32> {
-    pub fn new(bitmap: ImgVec<f32>, is_chroma: bool) -> Self {
-        debug_assert!(bitmap.pixels().all(|i| i.is_finite() && i >= 0.0 && i <= 1.0));
-
-        Self {
-            width: bitmap.width(),
-            height: bitmap.height(),
-            mu: Vec::new(),
-            img: Some(bitmap),
-            img_sq_blur: Vec::new(),
-            is_chroma,
-        }
-    }
-}
-
-impl DssimChan<f32> {
-    fn preprocess(&mut self, tmp: &mut [MaybeUninit<f32>]) {
-        let width = self.width;
-        let height = self.height;
+    /// Stores only the (optionally chroma-pre-blurred) image plane.
+    /// `mu`, `img_sq_blur`, and `img1_img2_blur` are derived at compare
+    /// time: keeping them persistent costs 8 more bytes per pixel per
+    /// channel, which dominates peak RSS for large images.
+    pub fn new(mut bitmap: ImgVec<f32>, is_chroma: bool, tmp: &mut [MaybeUninit<f32>]) -> Self {
+        let width = bitmap.width();
+        let height = bitmap.height();
         assert!(width > 0);
         assert!(height > 0);
+        debug_assert_eq!(width * height, bitmap.pixels().count());
+        debug_assert!(bitmap.pixels().all(|i| i.is_finite() && i >= 0.0 && i <= 1.0));
 
-        let img = self.img.as_mut().unwrap();
-        debug_assert_eq!(width * height, img.pixels().count());
-        debug_assert!(img.pixels().all(f32::is_finite));
-
-        if self.is_chroma {
-            blur::blur_in_place(img.as_mut(), tmp);
+        if is_chroma {
+            blur::blur_in_place(bitmap.as_mut(), tmp);
         }
-        let (mu, ..) = blur::blur(img.as_ref(), tmp).into_contiguous_buf();
-        self.mu = mu;
-
-        // Fused squared-image blur: blur_mul(img, img) does a single H5*V5 pass
-        // over img*img, avoiding both the materialized i*i vector and the
-        // separate in-place blur over it.
-        self.img_sq_blur = blur::blur_mul(img.as_ref(), img.as_ref(), tmp);
-        debug_assert_eq!(self.img_sq_blur.len(), width * height);
+        Self {
+            width,
+            height,
+            img: Some(bitmap),
+        }
     }
-}
 
-impl Channable<f32, f32> for DssimChan<f32> {
-    fn img1_img2_blur(&self, modified: &Self, tmp32: &mut [MaybeUninit<f32>]) -> Vec<f32> {
-        let src = self.img.as_ref().unwrap();
-        let modified_img = modified.img.as_ref().unwrap();
+    /// Compute all derived planes for one channel of a comparison:
+    /// blurred means and squared-image blurs for both images, plus the
+    /// cross-blur. Five blur passes sharing one scratch buffer.
+    fn compare_planes(&self, modified: &Self, tmp: &mut [MaybeUninit<f32>]) -> ChanPlanes {
+        let img1 = self.img.as_ref().unwrap();
+        let img2 = modified.img.as_ref().unwrap();
+        let mu1 = blur::blur(img1.as_ref(), tmp).into_contiguous_buf().0;
+        let mu2 = blur::blur(img2.as_ref(), tmp).into_contiguous_buf().0;
+        let sq1 = blur::blur_mul(img1.as_ref(), img1.as_ref(), tmp);
+        let sq2 = blur::blur_mul(img2.as_ref(), img2.as_ref(), tmp);
         // Fused multiply+blur: avoids materializing the product as a Vec.
-        blur::blur_mul(src.as_ref(), modified_img.as_ref(), tmp32)
+        let i12 = blur::blur_mul(img1.as_ref(), img2.as_ref(), tmp);
+        ChanPlanes { mu1, mu2, sq1, sq2, i12 }
     }
 }
 
@@ -232,12 +225,9 @@ impl Dssim {
                     chan: lab.into_par_iter().with_max_len(1).enumerate().map(|(n,l)| {
                         let w = l.width();
                         let h = l.height();
-                        let mut ch = DssimChan::new(l, n > 0);
-
                         let pixels = w * h;
                         let mut tmp = Vec::with_capacity(pixels);
-                        ch.preprocess(&mut tmp.spare_capacity_mut()[..pixels]);
-                        ch
+                        DssimChan::new(l, n > 0, &mut tmp.spare_capacity_mut()[..pixels])
                     }).collect(),
                 }
             }
@@ -277,22 +267,22 @@ impl Dssim {
 
             let ssim_map = match original_image_scale.chan.len() {
                 3 => {
-                    // Compute the per-channel cross-blur (img1·img2 then blur) for L, a, b
-                    // in parallel — three independent blurs over disjoint memory.
-                    // Each channel gets its own tmp buffer.
-                    let img1_img2_blur: Vec<Vec<f32>> = (0..3usize).into_par_iter().map(|c| {
+                    // Compute the per-channel moment planes (mu, sq, i12) for
+                    // L, a, b in parallel — five blur passes per channel over
+                    // disjoint memory. Each channel gets its own tmp buffer.
+                    let planes: Vec<ChanPlanes> = (0..3usize).into_par_iter().map(|c| {
                         let mut tmp_buf: Vec<f32> = Vec::with_capacity(pixels);
                         let tmp = &mut tmp_buf.spare_capacity_mut()[..pixels];
                         original_image_scale.chan[c]
-                            .img1_img2_blur(&modified_image_scale.chan[c], tmp)
+                            .compare_planes(&modified_image_scale.chan[c], tmp)
                     }).collect();
-                    Self::compare_scale_3ch(original_image_scale, modified_image_scale, &img1_img2_blur)
+                    Self::compare_scale_3ch(original_image_scale, modified_image_scale, &planes)
                 },
                 1 => {
                     let mut tmp_buf: Vec<f32> = Vec::with_capacity(pixels);
                     let tmp = &mut tmp_buf.spare_capacity_mut()[..pixels];
-                    let img1_img2_blur = original_image_scale.chan[0].img1_img2_blur(&modified_image_scale.chan[0], tmp);
-                    Self::compare_scale(&original_image_scale.chan[0], &modified_image_scale.chan[0], &img1_img2_blur)
+                    let planes = original_image_scale.chan[0].compare_planes(&modified_image_scale.chan[0], tmp);
+                    Self::compare_scale(&planes, original_image_scale.chan[0].width, original_image_scale.chan[0].height)
                 },
                 _ => panic!(),
             };
@@ -336,30 +326,29 @@ impl Dssim {
     fn compare_scale_3ch(
         original: &DssimChanScale<f32>,
         modified: &DssimChanScale<f32>,
-        img1_img2_blur: &[Vec<f32>],
+        planes: &[ChanPlanes],
     ) -> ImgVec<f32> {
         let width = original.chan[0].width;
         let height = original.chan[0].height;
         let pixels = width * height;
 
-        let (o0, o1, o2) = (&original.chan[0], &original.chan[1], &original.chan[2]);
-        let (m0, m1, m2) = (&modified.chan[0], &modified.chan[1], &modified.chan[2]);
+        let (c0, c1, c2) = (&planes[0], &planes[1], &planes[2]);
 
-        let o0_mu = &o0.mu[..pixels];
-        let o1_mu = &o1.mu[..pixels];
-        let o2_mu = &o2.mu[..pixels];
-        let m0_mu = &m0.mu[..pixels];
-        let m1_mu = &m1.mu[..pixels];
-        let m2_mu = &m2.mu[..pixels];
-        let o0_sq = &o0.img_sq_blur[..pixels];
-        let o1_sq = &o1.img_sq_blur[..pixels];
-        let o2_sq = &o2.img_sq_blur[..pixels];
-        let m0_sq = &m0.img_sq_blur[..pixels];
-        let m1_sq = &m1.img_sq_blur[..pixels];
-        let m2_sq = &m2.img_sq_blur[..pixels];
-        let i12_0 = &img1_img2_blur[0][..pixels];
-        let i12_1 = &img1_img2_blur[1][..pixels];
-        let i12_2 = &img1_img2_blur[2][..pixels];
+        let o0_mu = &c0.mu1[..pixels];
+        let o1_mu = &c1.mu1[..pixels];
+        let o2_mu = &c2.mu1[..pixels];
+        let m0_mu = &c0.mu2[..pixels];
+        let m1_mu = &c1.mu2[..pixels];
+        let m2_mu = &c2.mu2[..pixels];
+        let o0_sq = &c0.sq1[..pixels];
+        let o1_sq = &c1.sq1[..pixels];
+        let o2_sq = &c2.sq1[..pixels];
+        let m0_sq = &c0.sq2[..pixels];
+        let m1_sq = &c1.sq2[..pixels];
+        let m2_sq = &c2.sq2[..pixels];
+        let i12_0 = &c0.i12[..pixels];
+        let i12_1 = &c1.i12[..pixels];
+        let i12_2 = &c2.i12[..pixels];
 
         let inputs = Ssim3Planes {
             mu1: [o0_mu, o1_mu, o2_mu],
@@ -384,42 +373,32 @@ impl Dssim {
         ImgVec::new(map_out, width, height)
     }
 
+    /// Single-channel SSIM map over the compare-time planes.
     #[inline(never)]
-    fn compare_scale<L>(original: &DssimChan<L>, modified: &DssimChan<L>, img1_img2_blur: &[L]) -> ImgVec<f32>
-    where
-        L: Send + Sync + Clone + Copy + ops::Mul<Output = L> + ops::Sub<Output = L> + 'static,
-        f32: From<L>,
-    {
-        assert_eq!(original.width, modified.width);
-        assert_eq!(original.height, modified.height);
-
-        let width = original.width;
-        let height = original.height;
-
+    fn compare_scale(planes: &ChanPlanes, width: usize, height: usize) -> ImgVec<f32> {
         let c1 = 0.01 * 0.01;
         let c2 = 0.03 * 0.03;
 
-        debug_assert_eq!(original.mu.len(), modified.mu.len());
-        debug_assert_eq!(original.img_sq_blur.len(), modified.img_sq_blur.len());
-        debug_assert_eq!(img1_img2_blur.len(), original.mu.len());
-        debug_assert_eq!(img1_img2_blur.len(), original.img_sq_blur.len());
+        let pixels = width * height;
+        debug_assert_eq!(planes.mu1.len(), pixels);
+        debug_assert_eq!(planes.mu2.len(), pixels);
+        debug_assert_eq!(planes.sq1.len(), pixels);
+        debug_assert_eq!(planes.sq2.len(), pixels);
+        debug_assert_eq!(planes.i12.len(), pixels);
 
-        let mu_iter = original.mu.as_slice().par_iter().with_min_len(1<<10).cloned().zip_eq(modified.mu.as_slice().par_iter().with_min_len(1<<10).cloned());
-        let sq_iter = original.img_sq_blur.as_slice().par_iter().with_min_len(1<<10).cloned().zip_eq(modified.img_sq_blur.as_slice().par_iter().with_min_len(1<<10).cloned());
-        let map_out = img1_img2_blur.par_iter().with_min_len(1<<10).cloned().zip_eq(mu_iter).zip_eq(sq_iter)
-        .map(|((img1_img2_blur, (mu1, mu2)), (img1_sq_blur, img2_sq_blur))| {
+        let mu_iter = planes.mu1.par_iter().with_min_len(1<<10).copied().zip_eq(planes.mu2.par_iter().with_min_len(1<<10).copied());
+        let sq_iter = planes.sq1.par_iter().with_min_len(1<<10).copied().zip_eq(planes.sq2.par_iter().with_min_len(1<<10).copied());
+        let map_out = planes.i12.par_iter().with_min_len(1<<10).copied().zip_eq(mu_iter).zip_eq(sq_iter)
+        .map(|((i12, (mu1, mu2)), (sq1, sq2))| {
             let mu1mu1 = mu1 * mu1;
             let mu1mu2 = mu1 * mu2;
             let mu2mu2 = mu2 * mu2;
-            let mu1_sq: f32 = mu1mu1.into();
-            let mu2_sq: f32 = mu2mu2.into();
-            let mu1_mu2: f32 = mu1mu2.into();
-            let sigma1_sq: f32 = (img1_sq_blur - mu1mu1).into();
-            let sigma2_sq: f32 = (img2_sq_blur - mu2mu2).into();
-            let sigma12: f32 = (img1_img2_blur - mu1mu2).into();
+            let sigma1_sq = sq1 - mu1mu1;
+            let sigma2_sq = sq2 - mu2mu2;
+            let sigma12 = i12 - mu1mu2;
 
-            2.0f32.mul_add(mu1_mu2, c1) * 2.0f32.mul_add(sigma12, c2) /
-                       ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+            2.0f32.mul_add(mu1mu2, c1) * 2.0f32.mul_add(sigma12, c2) /
+                       ((mu1mu1 + mu2mu2 + c1) * (sigma1_sq + sigma2_sq + c2))
         }).collect();
 
         ImgVec::new(map_out, width, height)
@@ -780,8 +759,6 @@ fn create_image_fused_parity() {
                 }
             };
             cmp(&fc.img.as_ref().unwrap().buf(), &rc.img.as_ref().unwrap().buf(), "img");
-            cmp(&fc.mu, &rc.mu, "mu");
-            cmp(&fc.img_sq_blur, &rc.img_sq_blur, "img_sq_blur");
         }
     }
 }
