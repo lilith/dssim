@@ -80,6 +80,54 @@ fn cbrt_poly(x: f32) -> f32 {
     t
 }
 
+// These copies let LLVM see the scalar pixel expression inside the ISA-enabled
+// row loop without changing the functions used elsewhere in image preparation.
+#[inline(always)]
+fn cbrt_poly_auto(x: f32) -> f32 {
+    if x == 0.0 { return 0.0; }
+    let t = cbrt_initial(x);
+    let r = t * t * t;
+    let t = t * x.mul_add(2.0, r) / r.mul_add(2.0, x);
+    let r = t * t * t;
+    let t = t * x.mul_add(2.0, r) / r.mul_add(2.0, x);
+    debug_assert!(t < 1.001);
+    debug_assert!(x < 216. / 24389. || t >= 16. / 116.);
+    t
+}
+
+#[inline(always)]
+fn to_lab_auto_pixel(px: RGBLU) -> (f32, f32, f32) {
+    let fx = fma_matrix(px.r, 0.4124 / D65x, px.g, 0.3576 / D65x, px.b, 0.1805 / D65x);
+    let fy = fma_matrix(px.r, 0.2126 / D65y, px.g, 0.7152 / D65y, px.b, 0.0722 / D65y);
+    let fz = fma_matrix(px.r, 0.0193 / D65z, px.g, 0.1192 / D65z, px.b, 0.9505 / D65z);
+
+    let X = if fx > EPSILON { cbrt_poly_auto(fx) - 16. / 116. } else { K * fx };
+    let Y = if fy > EPSILON { cbrt_poly_auto(fy) - 16. / 116. } else { K * fy };
+    let Z = if fz > EPSILON { cbrt_poly_auto(fz) - 16. / 116. } else { K * fz };
+
+    let lab = (
+        Y * 1.05f32,
+        (500.0 / 220.0f32).mul_add(X - Y, 86.2 / 220.0f32),
+        (200.0 / 220.0f32).mul_add(Y - Z, 107.9 / 220.0f32),
+    );
+    debug_assert!(lab.0 <= 1.0 && lab.1 <= 1.0 && lab.2 <= 1.0);
+    lab
+}
+
+#[inline(always)]
+fn to_rgb_auto_pixel(px: RGBAPLU, n: usize) -> RGBLU {
+    let mut r = px.r;
+    let mut g = px.g;
+    let mut b = px.b;
+    let a = px.a;
+    if a < 255.0 {
+        if (n & 16) != 0 { r += 1.0 - a; }
+        if (n & 8) != 0 { g += 1.0 - a; }
+        if (n & 32) != 0 { b += 1.0 - a; }
+    }
+    RGBLU { r, g, b }
+}
+
 /// Convert image to L\*a\*b\* planar
 ///
 /// It should return 1 (gray) or 3 (color) planes.
@@ -162,18 +210,63 @@ fn rgb_to_lab<T: Copy + Sync + Send + 'static, F>(img: ImgRef<'_, T>, cb: F) -> 
     ]
 }
 
+// Benchmark control: scalar source loop compiled in the same ISA region as the
+// hand-written kernels. LLVM may autovectorize; no manual intrinsics are used.
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg_attr(target_arch = "x86_64", target_feature(enable = "avx2,fma"))]
+#[cfg_attr(target_arch = "aarch64", target_feature(enable = "neon"))]
+#[inline(never)]
+fn rgb_to_lab_auto<T: Copy + Sync + Send + 'static, F>(img: ImgRef<'_, T>, cb: F) -> Vec<GBitmap>
+    where F: Fn(T, usize) -> (f32, f32, f32) + Sync + Send + 'static
+{
+    let width = img.width();
+    assert!(width > 0);
+    let height = img.height();
+    let area = width * height;
+
+    let mut out_l = Vec::with_capacity(area);
+    let mut out_a = Vec::with_capacity(area);
+    let mut out_b = Vec::with_capacity(area);
+
+    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
+        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
+            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
+    ).enumerate()
+    .for_each(|(y, (l_row, (a_row, b_row)))| {
+        let in_row = &img.rows().nth(y).unwrap()[0..width];
+        let l_row = &mut l_row[0..width];
+        let a_row = &mut a_row[0..width];
+        let b_row = &mut b_row[0..width];
+        for x in 0..width {
+            let n = (x+11) ^ (y+11);
+            let (l,a,b) = cb(in_row[x], n);
+            l_row[x].write(l);
+            a_row[x].write(a);
+            b_row[x].write(b);
+        }
+    });
+
+    // SAFETY: every row writes all three channels before the parallel join.
+    unsafe { out_l.set_len(area); out_a.set_len(area); out_b.set_len(area); }
+    vec![
+        Img::new(out_l, width, height),
+        Img::new(out_a, width, height),
+        Img::new(out_b, width, height),
+    ]
+}
+
 impl ToLABBitmap for ImgRef<'_, RGBAPLU> {
     #[inline]
     fn to_lab(&self) -> Vec<GBitmap> {
         #[cfg(target_arch = "x86_64")]
         if simd_x86::has_avx2_fma() {
             // SAFETY: capability gate above guarantees AVX2+FMA at runtime.
-            return unsafe { simd_x86::rgbaplu_to_lab(*self) };
+            return unsafe { rgb_to_lab_auto(*self, |px: RGBAPLU, n| to_lab_auto_pixel(to_rgb_auto_pixel(px, n))) };
         }
         #[cfg(target_arch = "aarch64")]
         if simd_neon::has_neon() {
             // SAFETY: capability gate above guarantees NEON at runtime.
-            return unsafe { simd_neon::rgbaplu_to_lab(*self) };
+            return unsafe { rgb_to_lab_auto(*self, |px: RGBAPLU, n| to_lab_auto_pixel(to_rgb_auto_pixel(px, n))) };
         }
         rgb_to_lab(*self, |px, n| px.to_rgb(n).to_lab())
     }
@@ -185,12 +278,12 @@ impl ToLABBitmap for ImgRef<'_, RGBLU> {
         #[cfg(target_arch = "x86_64")]
         if simd_x86::has_avx2_fma() {
             // SAFETY: capability gate above guarantees AVX2+FMA at runtime.
-            return unsafe { simd_x86::rgblu_to_lab(*self) };
+            return unsafe { rgb_to_lab_auto(*self, |px: RGBLU, _n| to_lab_auto_pixel(px)) };
         }
         #[cfg(target_arch = "aarch64")]
         if simd_neon::has_neon() {
             // SAFETY: capability gate above guarantees NEON at runtime.
-            return unsafe { simd_neon::rgblu_to_lab(*self) };
+            return unsafe { rgb_to_lab_auto(*self, |px: RGBLU, _n| to_lab_auto_pixel(px)) };
         }
         rgb_to_lab(*self, |px, _n| px.to_lab())
     }
