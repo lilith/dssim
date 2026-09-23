@@ -86,20 +86,64 @@ impl ToLABBitmap for ImgVec<RGBLU> {
 impl ToLABBitmap for GBitmap {
     fn to_lab(&self) -> Vec<GBitmap> {
         debug_assert!(self.width() > 0);
-        let f = |fy| {
-            if fy > EPSILON { (cbrt_poly(fy) - 16. / 116.) * 1.16 } else { (K * 1.16) * fy }
-        };
+        let area = self.width() * self.height();
+        // ImgVec is tightly packed, so the whole bitmap is one flat slice.
+        let src = &self.buf()[..area];
+        let mut out: Vec<f32> = Vec::with_capacity(area);
+        let dst = &mut out.spare_capacity_mut()[..area];
 
         #[cfg(feature = "threads")]
-        let out = (0..self.height()).into_par_iter().flat_map_iter(|y| {
-            self[y].iter().map(|&fy| f(fy))
-        }).collect();
-
+        dst.par_chunks_mut(GRAY_CHUNK).enumerate().for_each(|(ci, d)| {
+            gray_to_lab_range(&src[ci * GRAY_CHUNK..][..d.len()], d);
+        });
         #[cfg(not(feature = "threads"))]
-        let out = self.pixels().map(f).collect();
+        gray_to_lab_range(src, dst);
 
+        // SAFETY: every element of `dst` was written by `gray_to_lab_range`.
+        unsafe { out.set_len(area) };
         vec![Self::new(out, self.width(), self.height())]
     }
+}
+
+/// Parallel chunk size for the grayscale `to_lab` kernel (~64K px).
+const GRAY_CHUNK: usize = 1 << 14;
+
+/// `fy -> L*` over a flat range. `#[inline(always)]` so the AVX2+FMA
+/// wrapper re-vectorizes this same body under its target features instead
+/// of duplicating the arithmetic (same trick as `ssim3_range_*`).
+#[inline(always)]
+fn gray_to_lab_inline(src: &[f32], dst: &mut [MaybeUninit<f32>]) {
+    debug_assert_eq!(src.len(), dst.len());
+    for (&fy, d) in src.iter().zip(dst.iter_mut()) {
+        d.write(if fy > EPSILON { (cbrt_poly(fy) - 16. / 116.) * 1.16 } else { (K * 1.16) * fy });
+    }
+}
+
+#[inline(never)]
+fn gray_to_lab_base(src: &[f32], dst: &mut [MaybeUninit<f32>]) {
+    gray_to_lab_inline(src, dst);
+}
+
+/// AVX2+FMA clone of `gray_to_lab_base`; same source, vectorized wider.
+/// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2,fma")]
+fn gray_to_lab_avx2(src: &[f32], dst: &mut [MaybeUninit<f32>]) {
+    gray_to_lab_inline(src, dst);
+}
+
+/// Runtime dispatch: AVX2+FMA kernel when detected, baseline otherwise.
+/// aarch64 needs no clone — NEON is its baseline and autovectorizes.
+#[inline]
+fn gray_to_lab_range(src: &[f32], dst: &mut [MaybeUninit<f32>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx2_fma() {
+        // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+        unsafe { gray_to_lab_avx2(src, dst) };
+        return;
+    }
+    gray_to_lab_base(src, dst);
 }
 
 /// Per-pixel Lab conversion strategy for `rgb_to_lab`'s row kernels.
@@ -271,4 +315,32 @@ fn cbrts2() {
     }
     println!("2={totaldiff:0.6}; {maxdiff:0.8}");
     assert!(totaldiff < 0.0025, "{totaldiff}");
+}
+
+/// Scalar vs AVX2 parity for the dispatched grayscale `to_lab` kernel,
+/// covering both branches (below/above EPSILON), exact zero, and a
+/// sub-chunk tail (GRAY_CHUNK + 7 pixels).
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn gray_to_lab_dispatch_parity() {
+    if !crate::caps::has_avx2_fma() {
+        return;
+    }
+    let n = GRAY_CHUNK + 7;
+    let src: Vec<f32> = (0..n).map(|i| {
+        if i % 97 == 0 { 0.0 } else { (i as f32 / 997.0).fract() }
+    }).collect();
+    let mut base = vec![0f32; n];
+    let mut avx2 = vec![0f32; n];
+    gray_to_lab_base(&src, unsafe {
+        std::slice::from_raw_parts_mut(base.as_mut_ptr().cast(), n)
+    });
+    // SAFETY: has_avx2_fma() confirmed support above.
+    unsafe {
+        gray_to_lab_avx2(&src, std::slice::from_raw_parts_mut(avx2.as_mut_ptr().cast(), n));
+    }
+    for (i, (a, b)) in base.iter().zip(&avx2).enumerate() {
+        assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-6,
+            "gray_to_lab diverged at {i} (src={}): base={a} avx2={b}", src[i]);
+    }
 }
