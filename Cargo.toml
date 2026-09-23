@@ -73,5 +73,9 @@ debug = false
 panic = "abort"
 strip = true
 
+[profile.bench]
+debug = true
+strip = false
+
 [badges]
 maintenance = { status = "actively-developed" }
