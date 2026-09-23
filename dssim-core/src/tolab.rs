@@ -85,7 +85,8 @@ fn cbrt_poly(x: f32) -> f32 {
 #[inline(always)]
 fn cbrt_poly_auto(x: f32) -> f32 {
     if x == 0.0 { return 0.0; }
-    let t = cbrt_initial(x);
+    // Match the SIMD path's polynomial seed for a separate compiler-only control.
+    let t = (-0.5f32).mul_add(x, 1.51).mul_add(x, 0.2);
     let r = t * t * t;
     let t = t * x.mul_add(2.0, r) / r.mul_add(2.0, x);
     let r = t * t * t;
