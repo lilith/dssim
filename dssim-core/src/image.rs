@@ -89,28 +89,28 @@ impl std::ops::Sub<Self> for LAB {
 }
 
 impl LAB {
-    pub(crate) fn avg(&self) -> f32 {
+    pub(crate) fn avg(self) -> f32 {
         (self.l + self.a + self.b) * (1. / 3.)
     }
 }
 
 impl From<LAB> for f64 {
-    fn from(other: LAB) -> f64 {
-        (f64::from(other.l) + f64::from(other.a) + f64::from(other.b)) * (1. / 3.)
+    fn from(other: LAB) -> Self {
+        (Self::from(other.l) + Self::from(other.a) + Self::from(other.b)) * (1. / 3.)
     }
 }
 
 impl From<LAB> for f32 {
-    fn from(other: LAB) -> f32 {
+    fn from(other: LAB) -> Self {
         other.avg()
     }
 }
 
-impl std::ops::Div<LAB> for LAB {
-    type Output = LAB;
+impl std::ops::Div<Self> for LAB {
+    type Output = Self;
 
     fn div(self, other: Self::Output) -> Self::Output {
-        LAB {
+        Self {
             l: self.l / other.l,
             a: self.a / other.a,
             b: self.b / other.b,
@@ -191,7 +191,7 @@ pub trait Downsample {
 }
 
 impl<T> Downsample for ImgVec<T> where T: Average4 + Copy + Sync + Send {
-    type Output = ImgVec<T>;
+    type Output = Self;
 
     fn downsample(&self) -> Option<Self::Output> {
         self.as_ref().downsample()
@@ -219,7 +219,9 @@ impl<T> Downsample for ImgRef<'_, T> where T: Average4 + Copy + Sync + Send {
             let top = &top[0..half_width * 2];
             let bot = &bot[0..half_width * 2];
 
-            top.chunks_exact(2).zip(bot.chunks_exact(2)).map(|(a, b)| Average4::average4(a[0], a[1], b[0], b[1]))
+            top.as_chunks::<2>().0.iter()
+                .zip(bot.chunks_exact(2))
+                .map(|(a, b)| Average4::average4(a[0], a[1], b[0], b[1]))
         }));
 
         assert_eq!(half_width * half_height, scaled.len());
@@ -243,7 +245,7 @@ pub(crate) fn worst(input: ImgRef<'_, f32>) -> ImgVec<f32> {
         let top = &top[0..half_width * 2];
         let bot = &bot[0..half_width * 2];
 
-        top.chunks_exact(2).zip(bot.chunks_exact(2)).map(|(a,b)| {
+        top.as_chunks::<2>().0.iter().zip(bot.chunks_exact(2)).map(|(a,b)| {
             a[0].min(a[1]).min(b[0].min(b[1]))
         })
     }));
@@ -268,9 +270,9 @@ pub(crate) fn avgworst(input: ImgRef<'_, f32>) -> ImgVec<f32> {
         let top = &top[0..half_width * 2];
         let bot = &bot[0..half_width * 2];
 
-        top.chunks_exact(2).zip(bot.chunks_exact(2)).map(|(a,b)| {
-            (a[0] + a[1] + b[0] + b[1]).mul_add(0.25, a[0].min(a[1]).min(b[0].min(b[1])))*0.5
-        })
+        top.as_chunks::<2>().0.iter()
+            .zip(bot.chunks_exact(2))
+            .map(|(a, b)| (a[0] + a[1] + b[0] + b[1]).mul_add(0.25, a[0].min(a[1]).min(b[0].min(b[1]))) * 0.5)
     }));
 
     assert_eq!(half_width * half_height, scaled.len());
@@ -293,7 +295,7 @@ pub(crate) fn avg(input: ImgRef<'_, f32>) -> ImgVec<f32> {
         let top = &top[0..half_width * 2];
         let bot = &bot[0..half_width * 2];
 
-        top.chunks_exact(2).zip(bot.chunks_exact(2)).map(|(a,b)| {
+        top.as_chunks::<2>().0.iter().zip(bot.chunks_exact(2)).map(|(a,b)| {
             (a[0] + a[1] + b[0] + b[1]) * 0.25
         })
     }));
