@@ -360,37 +360,26 @@ impl Dssim {
         let i12_1 = &img1_img2_blur[1][..pixels];
         let i12_2 = &img1_img2_blur[2][..pixels];
 
-        let c1: f32 = 0.01 * 0.01;
-        let c2: f32 = 0.03 * 0.03;
-        let inv3: f32 = 1.0 / 3.0;
+        let inputs = Ssim3Planes {
+            mu1: [o0_mu, o1_mu, o2_mu],
+            mu2: [m0_mu, m1_mu, m2_mu],
+            sq1: [o0_sq, o1_sq, o2_sq],
+            sq2: [m0_sq, m1_sq, m2_sq],
+            i12: [i12_0, i12_1, i12_2],
+        };
 
-        let map_out: Vec<f32> = (0..pixels).into_par_iter().with_min_len(1 << 10).map(|i| {
-            let mu1_0 = o0_mu[i]; let mu2_0 = m0_mu[i];
-            let mu1_1 = o1_mu[i]; let mu2_1 = m1_mu[i];
-            let mu1_2 = o2_mu[i]; let mu2_2 = m2_mu[i];
+        let mut map_out: Vec<f32> = Vec::with_capacity(pixels);
+        let dst: &mut [MaybeUninit<f32>] = &mut map_out.spare_capacity_mut()[..pixels];
 
-            let mu1mu1_0 = mu1_0 * mu1_0;
-            let mu1mu1_1 = mu1_1 * mu1_1;
-            let mu1mu1_2 = mu1_2 * mu1_2;
-            let mu2mu2_0 = mu2_0 * mu2_0;
-            let mu2mu2_1 = mu2_1 * mu2_1;
-            let mu2mu2_2 = mu2_2 * mu2_2;
-            let mu1mu2_0 = mu1_0 * mu2_0;
-            let mu1mu2_1 = mu1_1 * mu2_1;
-            let mu1mu2_2 = mu1_2 * mu2_2;
+        #[cfg(feature = "threads")]
+        dst.par_chunks_mut(SSIM3_CHUNK).enumerate().for_each(|(ci, out)| {
+            ssim3_range(&inputs, ci * SSIM3_CHUNK, out);
+        });
+        #[cfg(not(feature = "threads"))]
+        ssim3_range(&inputs, 0, dst);
 
-            let mu1_sq  = (mu1mu1_0 + mu1mu1_1 + mu1mu1_2) * inv3;
-            let mu2_sq  = (mu2mu2_0 + mu2mu2_1 + mu2mu2_2) * inv3;
-            let mu1_mu2 = (mu1mu2_0 + mu1mu2_1 + mu1mu2_2) * inv3;
-
-            let sigma1_sq = ((o0_sq[i] - mu1mu1_0) + (o1_sq[i] - mu1mu1_1) + (o2_sq[i] - mu1mu1_2)) * inv3;
-            let sigma2_sq = ((m0_sq[i] - mu2mu2_0) + (m1_sq[i] - mu2mu2_1) + (m2_sq[i] - mu2mu2_2)) * inv3;
-            let sigma12  = ((i12_0[i] - mu1mu2_0) + (i12_1[i] - mu1mu2_1) + (i12_2[i] - mu1mu2_2)) * inv3;
-
-            2.0f32.mul_add(mu1_mu2, c1) * 2.0f32.mul_add(sigma12, c2)
-                / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
-        }).collect();
-
+        // SAFETY: every element of `dst` was written by `ssim3_range`.
+        unsafe { map_out.set_len(pixels) };
         ImgVec::new(map_out, width, height)
     }
 
@@ -434,6 +423,95 @@ impl Dssim {
 
         ImgVec::new(map_out, width, height)
     }
+}
+
+/// Parallel chunk size for the SSIM map kernels: 4K pixels per rayon task
+/// keeps work-stealing granularity close to the old `with_min_len(1<<10)`
+/// split while giving each kernel call a run long enough to amortize the
+/// capability check.
+const SSIM3_CHUNK: usize = 1 << 12;
+
+/// Flat per-pixel inputs to the 3-channel SSIM map kernel: blurred means,
+/// blurred squared-image means, and cross-blurred products for each of the
+/// L/a/b channels. Every slice is `pixels` long.
+struct Ssim3Planes<'a> {
+    mu1: [&'a [f32]; 3],
+    mu2: [&'a [f32]; 3],
+    sq1: [&'a [f32]; 3],
+    sq2: [&'a [f32]; 3],
+    i12: [&'a [f32]; 3],
+}
+
+/// Per-pixel 3-channel SSIM value — the arithmetic previously inlined in
+/// `compare_scale_3ch`'s map closure.
+#[inline(always)]
+fn ssim3_px(s: &Ssim3Planes<'_>, i: usize) -> f32 {
+    let c1: f32 = 0.01 * 0.01;
+    let c2: f32 = 0.03 * 0.03;
+    let inv3: f32 = 1.0 / 3.0;
+
+    let mu1_0 = s.mu1[0][i]; let mu2_0 = s.mu2[0][i];
+    let mu1_1 = s.mu1[1][i]; let mu2_1 = s.mu2[1][i];
+    let mu1_2 = s.mu1[2][i]; let mu2_2 = s.mu2[2][i];
+
+    let mu1mu1_0 = mu1_0 * mu1_0;
+    let mu1mu1_1 = mu1_1 * mu1_1;
+    let mu1mu1_2 = mu1_2 * mu1_2;
+    let mu2mu2_0 = mu2_0 * mu2_0;
+    let mu2mu2_1 = mu2_1 * mu2_1;
+    let mu2mu2_2 = mu2_2 * mu2_2;
+    let mu1mu2_0 = mu1_0 * mu2_0;
+    let mu1mu2_1 = mu1_1 * mu2_1;
+    let mu1mu2_2 = mu1_2 * mu2_2;
+
+    let mu1_sq  = (mu1mu1_0 + mu1mu1_1 + mu1mu1_2) * inv3;
+    let mu2_sq  = (mu2mu2_0 + mu2mu2_1 + mu2mu2_2) * inv3;
+    let mu1_mu2 = (mu1mu2_0 + mu1mu2_1 + mu1mu2_2) * inv3;
+
+    let sigma1_sq = ((s.sq1[0][i] - mu1mu1_0) + (s.sq1[1][i] - mu1mu1_1) + (s.sq1[2][i] - mu1mu1_2)) * inv3;
+    let sigma2_sq = ((s.sq2[0][i] - mu2mu2_0) + (s.sq2[1][i] - mu2mu2_1) + (s.sq2[2][i] - mu2mu2_2)) * inv3;
+    let sigma12  = ((s.i12[0][i] - mu1mu2_0) + (s.i12[1][i] - mu1mu2_1) + (s.i12[2][i] - mu1mu2_2)) * inv3;
+
+    2.0f32.mul_add(mu1_mu2, c1) * 2.0f32.mul_add(sigma12, c2)
+        / ((mu1_sq + mu2_sq + c1) * (sigma1_sq + sigma2_sq + c2))
+}
+
+/// `ssim3_px` over `out[k] = px(base + k)`. `#[inline(always)]` so the
+/// AVX2+FMA wrapper re-vectorizes this same body under its target features
+/// instead of duplicating the arithmetic.
+#[inline(always)]
+fn ssim3_range_inline(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
+    for (k, d) in out.iter_mut().enumerate() {
+        d.write(ssim3_px(s, base + k));
+    }
+}
+
+#[inline(never)]
+fn ssim3_range_base(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
+    ssim3_range_inline(s, base, out);
+}
+
+/// AVX2+FMA clone of `ssim3_range_base`; same source, vectorized wider.
+/// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2,fma")]
+fn ssim3_range_avx2(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
+    ssim3_range_inline(s, base, out);
+}
+
+/// Runtime dispatch: AVX2+FMA kernel when detected, baseline otherwise.
+/// On statically-enabled builds `has_avx2_fma()` is a constant `true` and
+/// this collapses to the AVX2 wrapper unconditionally.
+#[inline]
+fn ssim3_range(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx2_fma() {
+        // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+        unsafe { ssim3_range_avx2(s, base, out) };
+        return;
+    }
+    ssim3_range_base(s, base, out);
 }
 
 /// `Σ f64::from(x)` with 8 independent accumulators. A sequential `fold`
@@ -630,4 +708,43 @@ fn poison() {
     let sub_img2 = d.create_image(&img.as_ref()).unwrap();
     let (res, _) = d.compare(&sub_img1, sub_img2);
     assert!(res < 0.000001);
+}
+
+/// Scalar vs AVX2 parity for the dispatched 3-channel SSIM kernel,
+/// including a sub-chunk tail (SSIM3_CHUNK + 13 pixels).
+#[test]
+#[cfg(target_arch = "x86_64")]
+fn ssim3_dispatch_parity() {
+    if !crate::caps::has_avx2_fma() {
+        return;
+    }
+    let n = SSIM3_CHUNK + 13;
+    // Deterministic pseudo-random planes in [0, 1].
+    let mk = |seed: u32| -> Vec<f32> {
+        (0..n).map(|i| {
+            let x = (i as u32).wrapping_mul(2_654_435_761).wrapping_add(seed);
+            ((x ^ (x >> 16)) & 0xFFFF) as f32 / 65536.0
+        }).collect()
+    };
+    let planes: Vec<Vec<f32>> = (0..15).map(mk).collect();
+    let s = Ssim3Planes {
+        mu1: [&planes[0], &planes[1], &planes[2]],
+        mu2: [&planes[3], &planes[4], &planes[5]],
+        sq1: [&planes[6], &planes[7], &planes[8]],
+        sq2: [&planes[9], &planes[10], &planes[11]],
+        i12: [&planes[12], &planes[13], &planes[14]],
+    };
+    let mut base = vec![0f32; n];
+    let mut avx2 = vec![0f32; n];
+    ssim3_range_base(&s, 0, unsafe {
+        std::slice::from_raw_parts_mut(base.as_mut_ptr().cast(), n)
+    });
+    // SAFETY: has_avx2_fma() confirmed support above.
+    unsafe {
+        ssim3_range_avx2(&s, 0, std::slice::from_raw_parts_mut(avx2.as_mut_ptr().cast(), n));
+    }
+    for (i, (a, b)) in base.iter().zip(&avx2).enumerate() {
+        assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-6,
+            "ssim3 diverged at {i}: base={a} avx2={b}");
+    }
 }
