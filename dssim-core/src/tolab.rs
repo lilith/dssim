@@ -14,6 +14,7 @@ const D65y: f32 = 1.0;
 const D65z: f32 = 1.089;
 
 pub type GBitmap = ImgVec<f32>;
+mod output;
 pub(crate) trait ToLAB {
     fn to_lab(&self) -> (f32, f32, f32);
 }
@@ -123,43 +124,15 @@ impl ToLABBitmap for GBitmap {
 fn rgb_to_lab<T: Copy + Sync + Send + 'static, F>(img: ImgRef<'_, T>, cb: F) -> Vec<GBitmap>
     where F: Fn(T, usize) -> (f32, f32, f32) + Sync + Send + 'static
 {
-    let width = img.width();
-    assert!(width > 0);
-    let height = img.height();
-    let area = width * height;
-
-    let mut out_l = Vec::with_capacity(area);
-    let mut out_a = Vec::with_capacity(area);
-    let mut out_b = Vec::with_capacity(area);
-
-    // For output width == stride
-    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
-    ).enumerate()
-    .for_each(|(y, (l_row, (a_row, b_row)))| {
-        let in_row = &img.rows().nth(y).unwrap()[0..width];
-        let l_row = &mut l_row[0..width];
-        let a_row = &mut a_row[0..width];
-        let b_row = &mut b_row[0..width];
-        for x in 0..width {
-            let n = (x+11) ^ (y+11);
-            let (l,a,b) = cb(in_row[x], n);
-            l_row[x].write(l);
-            a_row[x].write(a);
-            b_row[x].write(b);
+    output::lab_rows(img, |row, y, l_out, a_out, b_out| {
+        for (x, &pixel) in row.iter().enumerate() {
+            let n = (x + 11) ^ (y + 11);
+            let (l, a, b) = cb(pixel, n);
+            l_out.write(l);
+            a_out.write(a);
+            b_out.write(b);
         }
-    });
-
-    unsafe { out_l.set_len(area) };
-    unsafe { out_a.set_len(area) };
-    unsafe { out_b.set_len(area) };
-
-    vec![
-        Img::new(out_l, width, height),
-        Img::new(out_a, width, height),
-        Img::new(out_b, width, height),
-    ]
+    })
 }
 
 impl ToLABBitmap for ImgRef<'_, RGBAPLU> {

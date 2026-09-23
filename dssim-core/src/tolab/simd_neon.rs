@@ -5,33 +5,33 @@
 //! ABI baseline).
 
 use super::{GBitmap, EPSILON, K, RGBAPLU, RGBLU, D65x, D65y, D65z};
-#[cfg(not(feature = "threads"))]
-use crate::lieon as rayon;
 use core::arch::aarch64::*;
 use imgref::*;
-use rayon::prelude::*;
+use super::output::{lab_rows_simd, RowWriter};
+
+#[cfg(not(target_feature = "neon"))]
 use std::sync::atomic::{AtomicU8, Ordering};
 
 // 0 = unknown, 1 = neon supported, 2 = not supported.
+#[cfg(not(target_feature = "neon"))]
 static CAP: AtomicU8 = AtomicU8::new(0);
 
 pub(super) fn has_neon() -> bool {
-    // Build-time shortcut: virtually every aarch64 target spec already
-    // enables NEON (it's the AArch64 ABI baseline). When `cfg!` reports
-    // it's on, we skip the atomic load on every dispatch — the function
-    // folds to `true` at compile time. The `is_aarch64_feature_detected!`
-    // path remains for the embedded profiles that ship without NEON
-    // (e.g. `aarch64-unknown-none-softfloat`).
-    if cfg!(target_feature = "neon") {
-        return true;
+    // Statically enabled features need neither runtime detection nor a cache.
+    #[cfg(target_feature = "neon")]
+    {
+        true
     }
-    match CAP.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let yes = std::arch::is_aarch64_feature_detected!("neon");
-            CAP.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
-            yes
+    #[cfg(not(target_feature = "neon"))]
+    {
+        match CAP.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => {
+                let yes = std::arch::is_aarch64_feature_detected!("neon");
+                CAP.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
+                yes
+            }
         }
     }
 }
@@ -40,10 +40,10 @@ pub(super) fn has_neon() -> bool {
 /// SAFETY: caller must guarantee NEON at runtime.
 #[cfg(test)]
 #[target_feature(enable = "neon")]
-pub(super) unsafe fn cbrt_x4_test(input: [f32; 4]) -> [f32; 4] {
+pub(super) fn cbrt_x4_test(input: [f32; 4]) -> [f32; 4] {
     // SAFETY: `input` is a fully-initialized stack [f32; 4]; the load reads
     // exactly 4 in-bounds f32s.
-    let v = unsafe { vld1q_f32(input.as_ptr()) };
+    let v = load_f32(&input);
     let r = cbrt_x4(v);
     let mut out = [0.0f32; 4];
     // SAFETY: `out` is a stack [f32; 4]; the store writes 4 in-bounds f32s.
@@ -134,40 +134,61 @@ fn to_lab_x4(r: float32x4_t, g: float32x4_t, b: float32x4_t)
     (l, a, b_out)
 }
 
+// Memory operations accept fixed-size borrows. Row slicing checks dynamic bounds.
+#[cfg(test)]
+#[inline]
+#[target_feature(enable = "neon")]
+fn load_f32(input: &[f32; 4]) -> float32x4_t {
+    // SAFETY: the borrow covers exactly 4 initialized f32s; unaligned loads are allowed.
+    unsafe { vld1q_f32(input.as_ptr()) }
+}
+
+
+#[inline]
+#[target_feature(enable = "neon")]
+fn load_rgb(input: &[RGBLU; 4]) -> float32x4x3_t {
+    const { assert!(std::mem::size_of::<RGBLU>() == 3 * std::mem::size_of::<f32>()); }
+    // SAFETY: repr(C) RGB<f32>, no padding, 4 initialized pixels cover 12 floats.
+    unsafe { vld3q_f32(input.as_ptr().cast::<f32>()) }
+}
+
+#[inline]
+#[target_feature(enable = "neon")]
+fn load_rgba(input: &[RGBAPLU; 4]) -> float32x4x4_t {
+    const { assert!(std::mem::size_of::<RGBAPLU>() == 4 * std::mem::size_of::<f32>()); }
+    // SAFETY: repr(C) RGBA<f32>, no padding, 4 initialized pixels cover 16 floats.
+    unsafe { vld4q_f32(input.as_ptr().cast::<f32>()) }
+}
+
 /// One row of RGBLU pixels in 4-pixel chunks; scalar tail.
 /// Uses `vld3q_f32` to deinterleave AOS [r,g,b,r,g,b,…] directly.
 #[target_feature(enable = "neon")]
 fn rgblu_row(
     in_row: &[RGBLU],
-    l_row: &mut [std::mem::MaybeUninit<f32>],
-    a_row: &mut [std::mem::MaybeUninit<f32>],
-    b_row: &mut [std::mem::MaybeUninit<f32>],
+    l_row: &mut RowWriter<'_>,
+    a_row: &mut RowWriter<'_>,
+    b_row: &mut RowWriter<'_>,
     width: usize,
 ) {
+    // Input bounds are checked here; writers check each output write.
+    let in_row = &in_row[..width];
     let chunks = width / 4;
-    let base_ptr = in_row.as_ptr() as *const f32;
 
-    for c in 0..chunks {
-        let base = c * 4;
-        // SAFETY: 4 RGBLUs starting at `base_ptr + 3*base` are 12 contiguous
-        // f32s (Rgb<f32> is `#[repr(C)]` so the layout is r,g,b,…); the
-        // store writes 4 in-bounds f32s into each of l_row/a_row/b_row.
-        unsafe {
-            let rgb = vld3q_f32(base_ptr.add(3 * base));
-            let (l, a, b_out) = to_lab_x4(rgb.0, rgb.1, rgb.2);
-            vst1q_f32(l_row.as_mut_ptr().add(base).cast::<f32>(), l);
-            vst1q_f32(a_row.as_mut_ptr().add(base).cast::<f32>(), a);
-            vst1q_f32(b_row.as_mut_ptr().add(base).cast::<f32>(), b_out);
-        }
+    for pixels in in_row.as_chunks::<4>().0 {
+        let rgb = load_rgb(pixels);
+        let (l, a, b) = to_lab_x4(rgb.0, rgb.1, rgb.2);
+        l_row.write4(l);
+        a_row.write4(a);
+        b_row.write4(b);
     }
 
     // Scalar tail
     for i in (chunks * 4)..width {
         let p = in_row[i];
         let (l, a, b_out) = super::ToLAB::to_lab(&p);
-        l_row[i].write(l);
-        a_row[i].write(a);
-        b_row[i].write(b_out);
+        l_row.write(l);
+        a_row.write(a);
+        b_row.write(b_out);
     }
 }
 
@@ -176,14 +197,15 @@ fn rgblu_row(
 #[target_feature(enable = "neon")]
 fn rgbaplu_row(
     in_row: &[RGBAPLU],
-    l_row: &mut [std::mem::MaybeUninit<f32>],
-    a_row: &mut [std::mem::MaybeUninit<f32>],
-    b_row: &mut [std::mem::MaybeUninit<f32>],
+    l_row: &mut RowWriter<'_>,
+    a_row: &mut RowWriter<'_>,
+    b_row: &mut RowWriter<'_>,
     width: usize,
     y: usize,
 ) {
+    // Input bounds are checked here; writers check each output write.
+    let in_row = &in_row[..width];
     let chunks = width / 4;
-    let base_ptr = in_row.as_ptr() as *const f32;
 
     let one = vdupq_n_f32(1.0);
     let bit_r = vdupq_n_s32(16);
@@ -192,15 +214,14 @@ fn rgbaplu_row(
     let zero_i = vdupq_n_s32(0);
     let y_xor = vdupq_n_s32((y + 11) as i32);
     // (i + 11) for i in 0..4
-    let lane_off_arr: [i32; 4] = [11, 12, 13, 14];
-    // SAFETY: `lane_off_arr` is a fully-initialized stack [i32; 4].
-    let lane_off = unsafe { vld1q_s32(lane_off_arr.as_ptr()) };
+    let lane_off = vdupq_n_s32(11);
+    let lane_off = vsetq_lane_s32::<1>(12, lane_off);
+    let lane_off = vsetq_lane_s32::<2>(13, lane_off);
+    let lane_off = vsetq_lane_s32::<3>(14, lane_off);
 
-    for c in 0..chunks {
+    for (c, pixels) in in_row.as_chunks::<4>().0.iter().enumerate() {
         let base = c * 4;
-        // SAFETY: 4 RGBAPLUs starting at `base_ptr + 4*base` are 16
-        // contiguous f32s; Rgba<f32> is `#[repr(C)]`.
-        let rgba = unsafe { vld4q_f32(base_ptr.add(4 * base)) };
+        let rgba = load_rgba(pixels);
         let r = rgba.0;
         let g = rgba.1;
         let b = rgba.2;
@@ -226,88 +247,32 @@ fn rgbaplu_row(
         let b = vaddq_f32(b, dither_b);
 
         let (l, a_lab, b_lab) = to_lab_x4(r, g, b);
-        // SAFETY: stores write 4 f32 into in-bounds segments of *_row.
-        unsafe {
-            vst1q_f32(l_row.as_mut_ptr().add(base).cast::<f32>(), l);
-            vst1q_f32(a_row.as_mut_ptr().add(base).cast::<f32>(), a_lab);
-            vst1q_f32(b_row.as_mut_ptr().add(base).cast::<f32>(), b_lab);
-        }
+        l_row.write4(l);
+        a_row.write4(a_lab);
+        b_row.write4(b_lab);
     }
 
     for i in (chunks * 4)..width {
         let n = (i + 11) ^ (y + 11);
         let (l, a_lab, b_lab) = super::ToLAB::to_lab(&super::ToRGB::to_rgb(in_row[i], n));
-        l_row[i].write(l);
-        a_row[i].write(a_lab);
-        b_row[i].write(b_lab);
+        l_row.write(l);
+        a_row.write(a_lab);
+        b_row.write(b_lab);
     }
 }
 
 /// SAFETY: caller must guarantee NEON at runtime (via `has_neon()`).
 #[target_feature(enable = "neon")]
-pub(super) unsafe fn rgblu_to_lab(img: ImgRef<'_, RGBLU>) -> Vec<GBitmap> {
-    let width = img.width();
-    let height = img.height();
-    assert!(width > 0);
-    let area = width * height;
-
-    let mut out_l: Vec<f32> = Vec::with_capacity(area);
-    let mut out_a: Vec<f32> = Vec::with_capacity(area);
-    let mut out_b: Vec<f32> = Vec::with_capacity(area);
-
-    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
-    ).enumerate().for_each(|(y, (l_row, (a_row, b_row)))| {
-        let in_row = &img.rows().nth(y).unwrap()[0..width];
-        rgblu_row(in_row, &mut l_row[..width], &mut a_row[..width], &mut b_row[..width], width);
-    });
-
-    // SAFETY: each per-row call wrote every cell in [..width] of its three
-    // output rows; combined that's all `area` cells of each Vec.
-    unsafe {
-        out_l.set_len(area);
-        out_a.set_len(area);
-        out_b.set_len(area);
-    }
-
-    vec![
-        Img::new(out_l, width, height),
-        Img::new(out_a, width, height),
-        Img::new(out_b, width, height),
-    ]
+pub(super) fn rgblu_to_lab(img: ImgRef<'_, RGBLU>) -> Vec<GBitmap> {
+    lab_rows_simd(img, |row, _y, l, a, b| {
+        rgblu_row(row, l, a, b, row.len());
+    })
 }
 
 /// SAFETY: caller must guarantee NEON at runtime (via `has_neon()`).
 #[target_feature(enable = "neon")]
-pub(super) unsafe fn rgbaplu_to_lab(img: ImgRef<'_, RGBAPLU>) -> Vec<GBitmap> {
-    let width = img.width();
-    let height = img.height();
-    assert!(width > 0);
-    let area = width * height;
-
-    let mut out_l: Vec<f32> = Vec::with_capacity(area);
-    let mut out_a: Vec<f32> = Vec::with_capacity(area);
-    let mut out_b: Vec<f32> = Vec::with_capacity(area);
-
-    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
-    ).enumerate().for_each(|(y, (l_row, (a_row, b_row)))| {
-        let in_row = &img.rows().nth(y).unwrap()[0..width];
-        rgbaplu_row(in_row, &mut l_row[..width], &mut a_row[..width], &mut b_row[..width], width, y);
-    });
-
-    // SAFETY: see analogous comment in `rgblu_to_lab`.
-    unsafe {
-        out_l.set_len(area);
-        out_a.set_len(area);
-        out_b.set_len(area);
-    }
-
-    vec![
-        Img::new(out_l, width, height),
-        Img::new(out_a, width, height),
-        Img::new(out_b, width, height),
-    ]
+pub(super) fn rgbaplu_to_lab(img: ImgRef<'_, RGBAPLU>) -> Vec<GBitmap> {
+    lab_rows_simd(img, |row, y, l, a, b| {
+        rgbaplu_row(row, l, a, b, row.len(), y);
+    })
 }

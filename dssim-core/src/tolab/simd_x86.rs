@@ -5,33 +5,33 @@
 //! `-C target-cpu=x86-64-v3`).
 
 use super::{GBitmap, EPSILON, K, RGBAPLU, RGBLU, D65x, D65y, D65z};
-#[cfg(not(feature = "threads"))]
-use crate::lieon as rayon;
 use core::arch::x86_64::*;
 use imgref::*;
-use rayon::prelude::*;
+use super::output::{lab_rows_simd, RowWriter};
+
+#[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
 use std::sync::atomic::{AtomicU8, Ordering};
 
 // 0 = unknown, 1 = avx2+fma supported, 2 = not supported.
+#[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
 static CAP: AtomicU8 = AtomicU8::new(0);
 
 pub(super) fn has_avx2_fma() -> bool {
-    // Build-time shortcut: when the binary is compiled with
-    // `-C target-feature=+avx2,+fma` (or `-C target-cpu=x86-64-v3`),
-    // these features are statically present on every CPU that can
-    // actually run the binary. The two `cfg!` checks fold to constants,
-    // so this whole function collapses to `true` and the atomic load
-    // on the dispatch path is eliminated.
-    if cfg!(target_feature = "avx2") && cfg!(target_feature = "fma") {
-        return true;
+    // Statically enabled features need neither runtime detection nor a cache.
+    #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+    {
+        true
     }
-    match CAP.load(Ordering::Relaxed) {
-        1 => true,
-        2 => false,
-        _ => {
-            let yes = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
-            CAP.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
-            yes
+    #[cfg(not(all(target_feature = "avx2", target_feature = "fma")))]
+    {
+        match CAP.load(Ordering::Relaxed) {
+            1 => true,
+            2 => false,
+            _ => {
+                let yes = is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma");
+                CAP.store(if yes { 1 } else { 2 }, Ordering::Relaxed);
+                yes
+            }
         }
     }
 }
@@ -40,10 +40,10 @@ pub(super) fn has_avx2_fma() -> bool {
 /// SAFETY: caller must guarantee AVX2+FMA at runtime.
 #[cfg(test)]
 #[target_feature(enable = "avx2,fma")]
-pub(super) unsafe fn cbrt_x8_test(input: [f32; 8]) -> [f32; 8] {
+pub(super) fn cbrt_x8_test(input: [f32; 8]) -> [f32; 8] {
     // SAFETY: `input` is a fully-initialized stack array of 8 f32; the load
     // reads exactly 8 f32 in bounds.
-    let v = unsafe { _mm256_loadu_ps(input.as_ptr()) };
+    let v = load_f32(&input);
     let r = cbrt_x8(v);
     let mut out = [0.0f32; 8];
     // SAFETY: `out` is a stack array of 8 f32; the store writes exactly 8 in bounds.
@@ -149,13 +149,13 @@ fn to_lab_x8(r: __m256, g: __m256, b: __m256) -> (__m256, __m256, __m256) {
 /// Microbench (Zen 4, single-thread, min of 30): RGBLU `to_lab` drops from
 /// ~24 cyc/px to ~22 cyc/px at 1024², and 28→27 cyc/px at 2048².
 ///
-/// SAFETY: caller must hold an AVX2-feature region (provided by the outer
-/// `#[target_feature(enable = "avx2,fma")]`); `ptr` must be valid for 24
-/// contiguous in-bounds `f32` reads.
 #[inline]
 #[target_feature(enable = "avx2")]
-unsafe fn deinterleave_rgb_f32_x8(ptr: *const f32) -> (__m256, __m256, __m256) {
-    // SAFETY: caller guarantees `ptr` covers 24 contiguous in-bounds f32.
+fn deinterleave_rgb_f32_x8(input: &[RGBLU; 8]) -> (__m256, __m256, __m256) {
+    const { assert!(std::mem::size_of::<RGBLU>() == 3 * std::mem::size_of::<f32>()); }
+    let ptr = input.as_ptr().cast::<f32>();
+    // SAFETY: RGB<f32> is repr(C), with initialized r/g/b fields and no padding.
+    // The array borrow covers all 24 floats, and these unaligned loads stay within it.
     let (v0, v1, v2) = unsafe {
         (
             _mm256_loadu_ps(ptr),
@@ -194,43 +194,44 @@ unsafe fn deinterleave_rgb_f32_x8(ptr: *const f32) -> (__m256, __m256, __m256) {
     (r, g, b)
 }
 
+// Memory operations accept fixed-size borrows. Row slicing checks dynamic bounds.
+#[inline]
+#[target_feature(enable = "avx2,fma")]
+fn load_f32(input: &[f32; 8]) -> __m256 {
+    // SAFETY: the borrow covers exactly 8 initialized f32s; unaligned loads are allowed.
+    unsafe { _mm256_loadu_ps(input.as_ptr()) }
+}
+
+
 /// Process one row of RGBLU pixels in 8-pixel chunks; scalar tail.
-/// `l_row`, `a_row`, `b_row` are uninitialized; every cell in `[..width]`
-/// is written before this returns.
+/// Writers record every initialized value; the caller checks completeness.
 #[target_feature(enable = "avx2,fma")]
 fn rgblu_row(
     in_row: &[RGBLU],
-    l_row: &mut [std::mem::MaybeUninit<f32>],
-    a_row: &mut [std::mem::MaybeUninit<f32>],
-    b_row: &mut [std::mem::MaybeUninit<f32>],
+    l_row: &mut RowWriter<'_>,
+    a_row: &mut RowWriter<'_>,
+    b_row: &mut RowWriter<'_>,
     width: usize,
 ) {
+    // Input bounds are checked here; writers check each output write.
+    let in_row = &in_row[..width];
     let chunks = width / 8;
 
-    for c in 0..chunks {
-        let base = c * 8;
-        // SAFETY: in_row[base..base+8] is in bounds (base+8 ≤ chunks*8 ≤ width
-        // and in_row.len() ≥ width, asserted at the call site). RGB<f32> is
-        // #[repr(C)] with fields (r, g, b) so 8 RGB pixels = 24 contiguous
-        // f32. Stores write 8 f32 each at *_row[base..base+8], in bounds for
-        // the same reason.
-        unsafe {
-            let pixel_ptr = in_row.as_ptr().add(base).cast::<f32>();
-            let (r, g, b) = deinterleave_rgb_f32_x8(pixel_ptr);
-            let (l, a, b_out) = to_lab_x8(r, g, b);
-            _mm256_storeu_ps(l_row.as_mut_ptr().add(base).cast::<f32>(), l);
-            _mm256_storeu_ps(a_row.as_mut_ptr().add(base).cast::<f32>(), a);
-            _mm256_storeu_ps(b_row.as_mut_ptr().add(base).cast::<f32>(), b_out);
-        }
+    for pixels in in_row.as_chunks::<8>().0 {
+        let (r, g, b) = deinterleave_rgb_f32_x8(pixels);
+        let (l, a, b) = to_lab_x8(r, g, b);
+        l_row.write8(l);
+        a_row.write8(a);
+        b_row.write8(b);
     }
 
     // Scalar tail
     for i in (chunks * 8)..width {
         let p = in_row[i];
         let (l, a, b_out) = super::ToLAB::to_lab(&p);
-        l_row[i].write(l);
-        a_row[i].write(a);
-        b_row[i].write(b_out);
+        l_row.write(l);
+        a_row.write(a);
+        b_row.write(b_out);
     }
 }
 
@@ -242,12 +243,14 @@ fn rgblu_row(
 #[target_feature(enable = "avx2,fma")]
 fn rgbaplu_row(
     in_row: &[RGBAPLU],
-    l_row: &mut [std::mem::MaybeUninit<f32>],
-    a_row: &mut [std::mem::MaybeUninit<f32>],
-    b_row: &mut [std::mem::MaybeUninit<f32>],
+    l_row: &mut RowWriter<'_>,
+    a_row: &mut RowWriter<'_>,
+    b_row: &mut RowWriter<'_>,
     width: usize,
     y: usize,
 ) {
+    // Input bounds are checked here; writers check each output write.
+    let in_row = &in_row[..width];
     let chunks = width / 8;
 
     let one = _mm256_set1_ps(1.0);
@@ -264,30 +267,16 @@ fn rgbaplu_row(
     let mut b_arr = [0.0f32; 8];
     let mut a_arr = [0.0f32; 8];
 
-    for c in 0..chunks {
+    for (c, pixels) in in_row.as_chunks::<8>().0.iter().enumerate() {
         let base = c * 8;
         for i in 0..8 {
-            let p = in_row[base + i];
+            let p = pixels[i];
             r_arr[i] = p.r;
             g_arr[i] = p.g;
             b_arr[i] = p.b;
             a_arr[i] = p.a;
         }
-        // SAFETY: same in-bounds argument as `rgblu_row`'s loads/stores.
-        // The RGBA hot path keeps the autovectorized scalar staging gather:
-        // a hand-rolled vpermps deinterleave wins on instruction count but
-        // loses on Zen 4 because the final cross-lane permute (needed to
-        // restore [c0..c7] order before the dither lane mask is applied)
-        // is port-5-bound — net ~1 % regression in microbench. The RGBLU
-        // path doesn't share this constraint, so it does use the hand-roll.
-        let (r, g, b, a) = unsafe {
-            (
-                _mm256_loadu_ps(r_arr.as_ptr()),
-                _mm256_loadu_ps(g_arr.as_ptr()),
-                _mm256_loadu_ps(b_arr.as_ptr()),
-                _mm256_loadu_ps(a_arr.as_ptr()),
-            )
-        };
+        let (r, g, b, a) = (load_f32(&r_arr), load_f32(&g_arr), load_f32(&b_arr), load_f32(&a_arr));
 
         // n_i = ((x_base + i + 11) as i32) ^ y_xor
         let x_base_v = _mm256_set1_epi32(base as i32);
@@ -318,89 +307,33 @@ fn rgbaplu_row(
         let b = _mm256_add_ps(b, dither_b);
 
         let (l, a_lab, b_lab) = to_lab_x8(r, g, b);
-        // SAFETY: stores write 8 f32 into in-bounds segments of *_row.
-        unsafe {
-            _mm256_storeu_ps(l_row.as_mut_ptr().add(base).cast::<f32>(), l);
-            _mm256_storeu_ps(a_row.as_mut_ptr().add(base).cast::<f32>(), a_lab);
-            _mm256_storeu_ps(b_row.as_mut_ptr().add(base).cast::<f32>(), b_lab);
-        }
+        l_row.write8(l);
+        a_row.write8(a_lab);
+        b_row.write8(b_lab);
     }
 
     // Scalar tail: fall back to scalar to_rgb + to_lab for the last <8 pixels.
     for i in (chunks * 8)..width {
         let n = (i + 11) ^ (y + 11);
         let (l, a_lab, b_lab) = super::ToLAB::to_lab(&super::ToRGB::to_rgb(in_row[i], n));
-        l_row[i].write(l);
-        a_row[i].write(a_lab);
-        b_row[i].write(b_lab);
+        l_row.write(l);
+        a_row.write(a_lab);
+        b_row.write(b_lab);
     }
 }
 
 /// SAFETY: caller must guarantee AVX2+FMA at runtime.
 #[target_feature(enable = "avx2,fma")]
-pub(super) unsafe fn rgblu_to_lab(img: ImgRef<'_, RGBLU>) -> Vec<GBitmap> {
-    let width = img.width();
-    let height = img.height();
-    assert!(width > 0);
-    let area = width * height;
-
-    let mut out_l: Vec<f32> = Vec::with_capacity(area);
-    let mut out_a: Vec<f32> = Vec::with_capacity(area);
-    let mut out_b: Vec<f32> = Vec::with_capacity(area);
-
-    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
-    ).enumerate().for_each(|(y, (l_row, (a_row, b_row)))| {
-        let in_row = &img.rows().nth(y).unwrap()[0..width];
-        rgblu_row(in_row, &mut l_row[..width], &mut a_row[..width], &mut b_row[..width], width);
-    });
-
-    // SAFETY: each per-row call wrote every cell in [..width] of its three
-    // output rows; combined that's all `area` cells of each Vec.
-    unsafe {
-        out_l.set_len(area);
-        out_a.set_len(area);
-        out_b.set_len(area);
-    }
-
-    vec![
-        Img::new(out_l, width, height),
-        Img::new(out_a, width, height),
-        Img::new(out_b, width, height),
-    ]
+pub(super) fn rgblu_to_lab(img: ImgRef<'_, RGBLU>) -> Vec<GBitmap> {
+    lab_rows_simd(img, |row, _y, l, a, b| {
+        rgblu_row(row, l, a, b, row.len());
+    })
 }
 
 /// SAFETY: caller must guarantee AVX2+FMA at runtime.
 #[target_feature(enable = "avx2,fma")]
-pub(super) unsafe fn rgbaplu_to_lab(img: ImgRef<'_, RGBAPLU>) -> Vec<GBitmap> {
-    let width = img.width();
-    let height = img.height();
-    assert!(width > 0);
-    let area = width * height;
-
-    let mut out_l: Vec<f32> = Vec::with_capacity(area);
-    let mut out_a: Vec<f32> = Vec::with_capacity(area);
-    let mut out_b: Vec<f32> = Vec::with_capacity(area);
-
-    out_l.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-        out_a.spare_capacity_mut().par_chunks_exact_mut(width).take(height).zip(
-            out_b.spare_capacity_mut().par_chunks_exact_mut(width).take(height))
-    ).enumerate().for_each(|(y, (l_row, (a_row, b_row)))| {
-        let in_row = &img.rows().nth(y).unwrap()[0..width];
-        rgbaplu_row(in_row, &mut l_row[..width], &mut a_row[..width], &mut b_row[..width], width, y);
-    });
-
-    // SAFETY: see analogous comment in `rgblu_to_lab`.
-    unsafe {
-        out_l.set_len(area);
-        out_a.set_len(area);
-        out_b.set_len(area);
-    }
-
-    vec![
-        Img::new(out_l, width, height),
-        Img::new(out_a, width, height),
-        Img::new(out_b, width, height),
-    ]
+pub(super) fn rgbaplu_to_lab(img: ImgRef<'_, RGBAPLU>) -> Vec<GBitmap> {
+    lab_rows_simd(img, |row, y, l, a, b| {
+        rgbaplu_row(row, l, a, b, row.len(), y);
+    })
 }
