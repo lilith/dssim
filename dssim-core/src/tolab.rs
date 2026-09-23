@@ -106,6 +106,7 @@ impl ToLABBitmap for GBitmap {
 }
 
 /// Parallel chunk size for the grayscale `to_lab` kernel (~64K px).
+#[cfg(feature = "threads")]
 const GRAY_CHUNK: usize = 1 << 14;
 
 /// `fy -> L*` over a flat range. `#[inline(always)]` so the AVX2+FMA
@@ -326,7 +327,7 @@ fn gray_to_lab_dispatch_parity() {
     if !crate::caps::has_avx2_fma() {
         return;
     }
-    let n = GRAY_CHUNK + 7;
+    let n = (1 << 14) + 7; // larger than a rayon chunk, with a tail
     let src: Vec<f32> = (0..n).map(|i| {
         if i % 97 == 0 { 0.0 } else { (i as f32 / 997.0).fract() }
     }).collect();

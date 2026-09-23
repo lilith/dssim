@@ -429,6 +429,7 @@ impl Dssim {
 /// keeps work-stealing granularity close to the old `with_min_len(1<<10)`
 /// split while giving each kernel call a run long enough to amortize the
 /// capability check.
+#[cfg(feature = "threads")]
 const SSIM3_CHUNK: usize = 1 << 12;
 
 /// Flat per-pixel inputs to the 3-channel SSIM map kernel: blurred means,
@@ -718,7 +719,7 @@ fn ssim3_dispatch_parity() {
     if !crate::caps::has_avx2_fma() {
         return;
     }
-    let n = SSIM3_CHUNK + 13;
+    let n = (1 << 12) + 13; // larger than a rayon chunk, with a tail
     // Deterministic pseudo-random planes in [0, 1].
     let mk = |seed: u32| -> Vec<f32> {
         (0..n).map(|i| {

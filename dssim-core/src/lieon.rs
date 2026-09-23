@@ -18,6 +18,8 @@ pub trait ParIterator: Sized {
 impl<T: Iterator> ParIterator for T {
 }
 
+// Some shim traits have no callers yet; kept for API parity with rayon.
+#[allow(dead_code)]
 pub trait ParSliceLie<T> {
     fn par_chunks(&self, n: usize) -> std::slice::Chunks<'_, T>;
 }
@@ -36,6 +38,7 @@ pub trait ParIterLie<T> {
     fn par_iter(&self) -> Self::Iter;
 }
 
+#[allow(dead_code)]
 pub trait ParIterMutLie<'a, T> {
     type Iter;
     fn par_iter_mut(&'a mut self) -> Self::Iter;
@@ -86,5 +89,13 @@ impl<T> ParIntoIterLie<T> for Vec<T> {
 
     fn into_par_iter(self) -> Self::IntoIter {
         self.into_iter()
+    }
+}
+
+impl ParIntoIterLie<usize> for std::ops::Range<usize> {
+    type IntoIter = Self;
+
+    fn into_par_iter(self) -> Self::IntoIter {
+        self
     }
 }
