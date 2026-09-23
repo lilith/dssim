@@ -3,21 +3,23 @@
 #![allow(clippy::manual_range_contains)]
 
 pub use dssim_core::*;
-use imgref::Img;
+use imgref::ImgRef;
 use load_image::ImageData;
 use std::path::Path;
 
 fn load(attr: &Dssim, path: &Path) -> Result<DssimImage<f32>, load_image::Error> {
     let img = load_image::load_path(path)?;
+    // Fused sRGB→Lab conversion: the pixel buffers are passed by reference
+    // and linearized inside the Lab loop, without a Vec<RGBAPLU> intermediate.
     Ok(match img.bitmap {
-        ImageData::RGB8(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgblu(), img.width, img.height)),
-        ImageData::RGB16(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgblu(), img.width, img.height)),
-        ImageData::RGBA8(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
-        ImageData::RGBA16(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
-        ImageData::GRAY8(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgblu(), img.width, img.height)),
-        ImageData::GRAY16(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgblu(), img.width, img.height)),
-        ImageData::GRAYA8(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
-        ImageData::GRAYA16(ref bitmap) => attr.create_image(&Img::new(bitmap.to_rgbaplu(), img.width, img.height)),
+        ImageData::RGB8(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::RGB16(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::RGBA8(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::RGBA16(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::GRAY8(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::GRAY16(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::GRAYA8(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
+        ImageData::GRAYA16(ref bitmap) => attr.create_image(&ImgRef::new(bitmap, img.width, img.height)),
     }.expect("infallible"))
 }
 

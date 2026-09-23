@@ -4,6 +4,7 @@
 use crate::image::ToRGB;
 use crate::image::RGBAPLU;
 use crate::image::RGBLU;
+use crate::linear::{GammaComponent, GammaPixel};
 use imgref::*;
 #[cfg(not(feature = "threads"))]
 use crate::lieon as rayon;
@@ -28,6 +29,7 @@ const EPSILON: f32 = 216. / 24389.;
 const K: f32 = 24389. / (27. * 116.); // http://www.brucelindbloom.com/LContinuity.html
 
 impl ToLAB for RGBLU {
+    #[inline(always)]
     fn to_lab(&self) -> (f32, f32, f32) {
         let fx = fma_matrix(self.r, 0.4124 / D65x, self.g, 0.3576 / D65x, self.b, 0.1805 / D65x);
         let fy = fma_matrix(self.r, 0.2126 / D65y, self.g, 0.7152 / D65y, self.b, 0.0722 / D65y);
@@ -249,8 +251,10 @@ fn rgb_to_lab<T, C>(img: ImgRef<'_, T>, conv: &C) -> Vec<GBitmap>
     ]
 }
 
+
 struct RgbapluLab;
 struct RgbluLab;
+struct FusedLab<'a, L>(&'a L);
 
 impl LabConv<RGBAPLU> for RgbapluLab {
     #[inline(always)]
@@ -266,6 +270,16 @@ impl LabConv<RGBLU> for RgbluLab {
     }
 }
 
+impl<P> LabConv<P> for FusedLab<'_, <P::Component as GammaComponent>::Lut>
+    where P: GammaPixel<Output = RGBAPLU> + Copy,
+          <P::Component as GammaComponent>::Lut: Sync
+{
+    #[inline(always)]
+    fn conv(&self, px: P, n: usize) -> (f32, f32, f32) {
+        px.to_linear(self.0).to_rgb(n).to_lab()
+    }
+}
+
 impl ToLABBitmap for ImgRef<'_, RGBAPLU> {
     #[inline]
     fn to_lab(&self) -> Vec<GBitmap> {
@@ -277,6 +291,32 @@ impl ToLABBitmap for ImgRef<'_, RGBLU> {
     #[inline]
     fn to_lab(&self) -> Vec<GBitmap> {
         rgb_to_lab(*self, &RgbluLab)
+    }
+}
+
+/// Fused sRGB→linear→Lab for integer-pixel inputs (`RGBA<u8>`, `RGB<u16>`,
+/// `BGRA`, `Gray`, `GrayAlpha`, …). Equivalent to `to_rgbaplu()`/`to_rgblu()`
+/// followed by `to_lab()` on the materialized buffer, but linearizes each
+/// pixel inside the Lab loop instead — skipping the intermediate
+/// `Vec<RGBAPLU>` (~16 bytes/px of transient memory at scale 0).
+impl<P> ToLABBitmap for ImgRef<'_, P>
+    where P: GammaPixel<Output = RGBAPLU> + Copy + Sync + Send + 'static,
+          <P::Component as GammaComponent>::Lut: Send + Sync
+{
+    #[inline]
+    fn to_lab(&self) -> Vec<GBitmap> {
+        let lut = P::make_lut();
+        rgb_to_lab(*self, &FusedLab(&lut))
+    }
+}
+
+impl<P> ToLABBitmap for ImgVec<P>
+    where P: GammaPixel<Output = RGBAPLU> + Copy + Sync + Send + 'static,
+          <P::Component as GammaComponent>::Lut: Send + Sync
+{
+    #[inline(always)]
+    fn to_lab(&self) -> Vec<GBitmap> {
+        self.as_ref().to_lab()
     }
 }
 
@@ -343,5 +383,48 @@ fn gray_to_lab_dispatch_parity() {
     for (i, (a, b)) in base.iter().zip(&avx2).enumerate() {
         assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-6,
             "gray_to_lab diverged at {i} (src={}): base={a} avx2={b}", src[i]);
+    }
+}
+
+/// Fused int-pixel → Lab must match `to_rgbaplu()`/`to_rgblu()` +
+/// `to_lab()` on the materialized buffer (odd width for tail coverage).
+#[test]
+fn fused_to_lab_parity() {
+    use crate::linear::ToRGBAPLU;
+    use rgb::alt::Gray;
+    use rgb::{RGB, RGBA};
+
+    let (w, h) = (37, 23);
+    let rgba: Vec<RGBA<u8>> = (0..w * h).map(|i| {
+        let v = (i as u32).wrapping_mul(2654435761).rotate_left(13);
+        RGBA::new(v as u8, (v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8)
+    }).collect();
+    let fused = ImgRef::new(&rgba[..], w, h).to_lab();
+    let reference = Img::new(rgba.to_rgbaplu(), w, h).as_ref().to_lab();
+    for (f, r) in fused.iter().zip(&reference) {
+        for (i, (a, b)) in f.buf().iter().zip(r.buf()).enumerate() {
+            assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-5,
+                "rgba fused to_lab diverged at {i}: {a} vs {b}");
+        }
+    }
+
+    let rgb: Vec<RGB<u8>> = rgba.iter().map(|p| p.rgb()).collect();
+    let fused = ImgRef::new(&rgb[..], w, h).to_lab();
+    let reference = Img::new(rgb.to_rgblu(), w, h).as_ref().to_lab();
+    for (f, r) in fused.iter().zip(&reference) {
+        for (i, (a, b)) in f.buf().iter().zip(r.buf()).enumerate() {
+            assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-5,
+                "rgb fused to_lab diverged at {i}: {a} vs {b}");
+        }
+    }
+
+    let gray: Vec<Gray<u8>> = rgba.iter().map(|p| Gray::new(p.r)).collect();
+    let fused = ImgRef::new(&gray[..], w, h).to_lab();
+    let reference = Img::new(gray.to_rgblu(), w, h).as_ref().to_lab();
+    for (f, r) in fused.iter().zip(&reference) {
+        for (i, (a, b)) in f.buf().iter().zip(r.buf()).enumerate() {
+            assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-5,
+                "gray fused to_lab diverged at {i}: {a} vs {b}");
+        }
     }
 }

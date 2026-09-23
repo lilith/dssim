@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 
+use crate::linear::GammaPixel;
 use imgref::*;
+use rgb::alt::*;
 use rgb::*;
 
 /// RGBA, but: premultiplied alpha, linear (using sRGB primaries, but not its gamma curve), f32 unit scale 0..1
@@ -158,6 +160,7 @@ pub(crate) trait ToRGB {
 }
 
 impl ToRGB for RGBAPLU {
+    #[inline(always)]
     fn to_rgb(self, n: usize) -> RGBLU {
         // Bit tests only read bits <32; u32 keeps vectorized compares in
         // 32-bit lanes instead of usize-wide ones.
@@ -229,6 +232,70 @@ impl<T> Downsample for ImgRef<'_, T> where T: Average4 + Copy + Sync + Send {
         assert_eq!(half_width * half_height, scaled.len());
         Some(Img::new(scaled, half_width, half_height))
     }
+}
+
+/// Downsampling for gamma-encoded integer pixels (`RGBA<u8>`, `RGB<u16>`,
+/// `Gray`, `GrayAlpha`, …): linearizes each pixel and averages in linear
+/// space — equivalent to `to_rgbaplu()` + `downsample()` without
+/// materializing the intermediate buffer.
+///
+/// Written per concrete type (a blanket impl would overlap the `Average4`
+/// impls above, since nothing rules out a type satisfying both bounds).
+macro_rules! downsample_gamma_pixel {
+    ($($t:ty),+ $(,)?) => {$(
+        impl Downsample for ImgVec<$t> {
+            type Output = ImgVec<RGBAPLU>;
+
+            fn downsample(&self) -> Option<Self::Output> {
+                self.as_ref().downsample()
+            }
+        }
+
+        impl Downsample for ImgRef<'_, $t> {
+            type Output = ImgVec<RGBAPLU>;
+
+            fn downsample(&self) -> Option<Self::Output> {
+                let stride = self.stride();
+                let width = self.width();
+                let height = self.height();
+
+                if width < 8 || height < 8 {
+                    return None;
+                }
+
+                let half_height = height / 2;
+                let half_width = width / 2;
+                let lut = <$t>::make_lut();
+
+                let mut scaled = Vec::with_capacity(half_width * half_height);
+                scaled.extend(self.buf().chunks(stride * 2).take(half_height).flat_map(|pair| {
+                    let lut = &lut;
+                    let (top, bot) = pair.split_at(stride);
+                    let top = &top[0..half_width * 2];
+                    let bot = &bot[0..half_width * 2];
+
+                    top.as_chunks::<2>().0.iter()
+                        .zip(bot.chunks_exact(2))
+                        .map(move |(a, b)| Average4::average4(
+                            a[0].to_linear(lut), a[1].to_linear(lut),
+                            b[0].to_linear(lut), b[1].to_linear(lut),
+                        ))
+                }));
+
+                assert_eq!(half_width * half_height, scaled.len());
+                Some(Img::new(scaled, half_width, half_height))
+            }
+        }
+    )+}
+}
+
+downsample_gamma_pixel! {
+    RGBA<u8>, RGBA<u16>,
+    RGB<u8>, RGB<u16>,
+    BGRA<u8>, BGRA<u16>,
+    BGR<u8>, BGR<u16>,
+    Gray<u8>, Gray<u16>,
+    GrayAlpha<u8>, GrayAlpha<u16>,
 }
 
 #[allow(dead_code)]
@@ -304,4 +371,22 @@ pub(crate) fn avg(input: ImgRef<'_, f32>) -> ImgVec<f32> {
 
     assert_eq!(half_width * half_height, scaled.len());
     Img::new(scaled, half_width, half_height)
+}
+
+/// `ImgRef<RGBA<u8>>::downsample()` must equal `to_rgbaplu()` followed by
+/// `Average4` downsampling on the materialized buffer — the two compute the
+/// same values, so they must be bit-identical (not merely close).
+#[test]
+fn fused_downsample_parity() {
+    use crate::linear::ToRGBAPLU;
+
+    let (w, h) = (66, 34); // odd halves exercise the odd-row tail
+    let px: Vec<RGBA<u8>> = (0..w * h).map(|i| {
+        let v = (i as u32).wrapping_mul(747_796_405).rotate_left(9);
+        RGBA::new(v as u8, (v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8)
+    }).collect();
+
+    let fused = ImgRef::new(&px[..], w, h).downsample().unwrap();
+    let reference = Img::new(px.to_rgbaplu(), w, h).downsample().unwrap();
+    assert_eq!(fused.buf(), reference.buf());
 }

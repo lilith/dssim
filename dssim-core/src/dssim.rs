@@ -21,7 +21,7 @@
 
 use crate::blur;
 use crate::image::*;
-use crate::linear::ToRGBAPLU;
+
 pub use crate::tolab::ToLABBitmap;
 pub use crate::val::Dssim as Val;
 use imgref::*;
@@ -176,7 +176,8 @@ impl Dssim {
         if width * height < bitmap.len() {
             return None;
         }
-        let img = ImgVec::new(bitmap.to_rgbaplu(), width, height);
+        // Fused sRGB→Lab: no intermediate `Vec<RGBAPLU>` is materialized.
+        let img = ImgRef::new(bitmap, width, height);
         self.create_image(&img)
     }
 
@@ -188,7 +189,7 @@ impl Dssim {
         if width * height < bitmap.len() {
             return None;
         }
-        let img = ImgVec::new(bitmap.to_rgblu(), width, height);
+        let img = ImgRef::new(bitmap, width, height);
         self.create_image(&img)
     }
 
@@ -747,5 +748,40 @@ fn ssim3_dispatch_parity() {
     for (i, (a, b)) in base.iter().zip(&avx2).enumerate() {
         assert!((f64::from(*a) - f64::from(*b)).abs() < 1e-6,
             "ssim3 diverged at {i}: base={a} avx2={b}");
+    }
+}
+
+/// End-to-end parity: `create_image_rgba` (fused linear→Lab + fused
+/// downsample) must produce the same per-scale planes as the materialized
+/// `to_rgbaplu()` + `create_image` path.
+#[test]
+fn create_image_fused_parity() {
+    use crate::linear::*;
+    use imgref::*;
+
+    let (w, h) = (66, 34);
+    let px: Vec<RGBA<u8>> = (0..w * h).map(|i| {
+        let v = (i as u32).wrapping_mul(224_682_251_9).rotate_left(7);
+        RGBA::new(v as u8, (v >> 8) as u8, (v >> 16) as u8, (v >> 24) as u8)
+    }).collect();
+
+    let d = new();
+    let fused = d.create_image_rgba(&px, w, h).unwrap();
+    let reference = d.create_image(&Img::new(px.to_rgbaplu(), w, h)).unwrap();
+
+    assert_eq!(fused.scale.len(), reference.scale.len());
+    for (si, (fs, rs)) in fused.scale.iter().zip(&reference.scale).enumerate() {
+        for (ci, (fc, rc)) in fs.chan.iter().zip(&rs.chan).enumerate() {
+            let cmp = |a: &[f32], b: &[f32], what: &str| {
+                assert_eq!(a.len(), b.len(), "scale {si} chan {ci} {what} len");
+                for (i, (x, y)) in a.iter().zip(b).enumerate() {
+                    assert!((f64::from(*x) - f64::from(*y)).abs() < 1e-5,
+                        "scale {si} chan {ci} {what} diverged at {i}: {x} vs {y}");
+                }
+            };
+            cmp(&fc.img.as_ref().unwrap().buf(), &rc.img.as_ref().unwrap().buf(), "img");
+            cmp(&fc.mu, &rc.mu, "mu");
+            cmp(&fc.img_sq_blur, &rc.img_sq_blur, "img_sq_blur");
+        }
     }
 }
