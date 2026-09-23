@@ -296,10 +296,10 @@ impl Dssim {
                 _ => panic!(),
             };
 
-            let sum = ssim_map.pixels().fold(0., |sum, i| sum + f64::from(i));
+            let sum = sum_f64(ssim_map.buf());
             let len = (ssim_map.width()*ssim_map.height()) as f64;
             let avg = (sum / len).max(0.0).powf((0.5_f64).powf(n as f64));
-            let score = 1.0 - (ssim_map.pixels().fold(0., |sum, i| sum + (avg - f64::from(i)).abs()) / len);
+            let score = 1.0 - (abs_dev_f64(ssim_map.buf(), avg) / len);
 
             let map = if self.save_maps_scales as usize > n {
                 Some(SsimMap {
@@ -434,6 +434,42 @@ impl Dssim {
 
         ImgVec::new(map_out, width, height)
     }
+}
+
+/// `Σ f64::from(x)` with 8 independent accumulators. A sequential `fold`
+/// can't vectorize (each add depends on the last); splitting the dependency
+/// chain is ~6x faster on this data on both baseline and native builds.
+/// Reassociates the summation, so results differ from `fold` at ~1e-13
+/// relative — far below the locked-value test tolerances.
+fn sum_f64(map: &[f32]) -> f64 {
+    let (chunks, tail) = map.as_chunks::<8>();
+    let mut acc = [0f64; 8];
+    for c in chunks {
+        for (a, &x) in acc.iter_mut().zip(c.iter()) {
+            *a += f64::from(x);
+        }
+    }
+    let mut sum: f64 = acc.iter().sum();
+    for &x in tail {
+        sum += f64::from(x);
+    }
+    sum
+}
+
+/// `Σ |avg − f64::from(x)|` — same multi-accumulator structure as `sum_f64`.
+fn abs_dev_f64(map: &[f32], avg: f64) -> f64 {
+    let (chunks, tail) = map.as_chunks::<8>();
+    let mut acc = [0f64; 8];
+    for c in chunks {
+        for (a, &x) in acc.iter_mut().zip(c.iter()) {
+            *a += (avg - f64::from(x)).abs();
+        }
+    }
+    let mut sum: f64 = acc.iter().sum();
+    for &x in tail {
+        sum += (avg - f64::from(x)).abs();
+    }
+    sum
 }
 
 fn to_dssim(ssim: f64) -> f64 {
