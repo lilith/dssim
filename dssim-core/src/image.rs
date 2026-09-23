@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::linear::GammaPixel;
+use crate::linear::{GammaComponent, GammaPixel};
 use imgref::*;
 use rgb::alt::*;
 use rgb::*;
@@ -195,6 +195,82 @@ pub trait Downsample {
     fn downsample(&self) -> Option<Self::Output>;
 }
 
+/// 2x2→1 average of a source row-pair:
+/// `out[i] = T::average4(top[2i], top[2i+1], bot[2i], bot[2i+1])`.
+/// `out.len()` is the output (half) width.
+#[inline(always)]
+fn downsample_row_pair_inline<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    for (i, o) in out.iter_mut().enumerate() {
+        o.write(T::average4(top[2 * i], top[2 * i + 1], bot[2 * i], bot[2 * i + 1]));
+    }
+}
+
+#[inline(never)]
+fn downsample_row_pair_base<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    downsample_row_pair_inline(top, bot, out)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn downsample_row_pair_avx2<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    downsample_row_pair_inline(top, bot, out)
+}
+
+fn downsample_row_pair<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx2_fma() {
+        // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+        return unsafe { downsample_row_pair_avx2(top, bot, out) };
+    }
+    downsample_row_pair_base(top, bot, out)
+}
+
+/// Same row-pair shape, but each source component is linearized through
+/// `lut` before averaging (gamma-encoded integer pixels → `RGBAPLU`).
+#[inline(always)]
+fn downsample_gamma_row_pair_inline<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
+where
+    P: GammaPixel<Output = RGBAPLU> + Copy,
+{
+    for (i, o) in out.iter_mut().enumerate() {
+        o.write(Average4::average4(
+            top[2 * i].to_linear(lut),
+            top[2 * i + 1].to_linear(lut),
+            bot[2 * i].to_linear(lut),
+            bot[2 * i + 1].to_linear(lut),
+        ));
+    }
+}
+
+#[inline(never)]
+fn downsample_gamma_row_pair_base<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
+where
+    P: GammaPixel<Output = RGBAPLU> + Copy,
+{
+    downsample_gamma_row_pair_inline(top, bot, lut, out)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn downsample_gamma_row_pair_avx2<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
+where
+    P: GammaPixel<Output = RGBAPLU> + Copy,
+{
+    downsample_gamma_row_pair_inline(top, bot, lut, out)
+}
+
+fn downsample_gamma_row_pair<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
+where
+    P: GammaPixel<Output = RGBAPLU> + Copy,
+{
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx2_fma() {
+        // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+        return unsafe { downsample_gamma_row_pair_avx2(top, bot, lut, out) };
+    }
+    downsample_gamma_row_pair_base(top, bot, lut, out)
+}
+
 impl<T> Downsample for ImgVec<T> where T: Average4 + Copy + Sync + Send {
     type Output = Self;
 
@@ -218,18 +294,15 @@ impl<T> Downsample for ImgRef<'_, T> where T: Average4 + Copy + Sync + Send {
         let half_height = height / 2;
         let half_width = width / 2;
 
-        let mut scaled = Vec::with_capacity(half_width * half_height);
-        scaled.extend(self.buf().chunks(stride * 2).take(half_height).flat_map(|pair| {
-            let (top, bot) = pair.split_at(stride);
-            let top = &top[0..half_width * 2];
-            let bot = &bot[0..half_width * 2];
-
-            top.as_chunks::<2>().0.iter()
-                .zip(bot.chunks_exact(2))
-                .map(|(a, b)| Average4::average4(a[0], a[1], b[0], b[1]))
-        }));
-
-        assert_eq!(half_width * half_height, scaled.len());
+        let mut scaled: Vec<T> = Vec::with_capacity(half_width * half_height);
+        for y in 0..half_height {
+            let row = y * 2 * stride;
+            let top = &self.buf()[row..row + half_width * 2];
+            let bot = &self.buf()[row + stride..row + stride + half_width * 2];
+            downsample_row_pair(top, bot, &mut scaled.spare_capacity_mut()[y * half_width..][..half_width]);
+        }
+        // SAFETY: every row pair wrote all half_width slots of its output row.
+        unsafe { scaled.set_len(half_width * half_height) };
         Some(Img::new(scaled, half_width, half_height))
     }
 }
@@ -267,22 +340,15 @@ macro_rules! downsample_gamma_pixel {
                 let half_width = width / 2;
                 let lut = <$t>::make_lut();
 
-                let mut scaled = Vec::with_capacity(half_width * half_height);
-                scaled.extend(self.buf().chunks(stride * 2).take(half_height).flat_map(|pair| {
-                    let lut = &lut;
-                    let (top, bot) = pair.split_at(stride);
-                    let top = &top[0..half_width * 2];
-                    let bot = &bot[0..half_width * 2];
-
-                    top.as_chunks::<2>().0.iter()
-                        .zip(bot.chunks_exact(2))
-                        .map(move |(a, b)| Average4::average4(
-                            a[0].to_linear(lut), a[1].to_linear(lut),
-                            b[0].to_linear(lut), b[1].to_linear(lut),
-                        ))
-                }));
-
-                assert_eq!(half_width * half_height, scaled.len());
+                let mut scaled: Vec<RGBAPLU> = Vec::with_capacity(half_width * half_height);
+                for y in 0..half_height {
+                    let row = y * 2 * stride;
+                    let top = &self.buf()[row..row + half_width * 2];
+                    let bot = &self.buf()[row + stride..row + stride + half_width * 2];
+                    downsample_gamma_row_pair(top, bot, &lut, &mut scaled.spare_capacity_mut()[y * half_width..][..half_width]);
+                }
+                // SAFETY: every row pair wrote all half_width slots of its output row.
+                unsafe { scaled.set_len(half_width * half_height) };
                 Some(Img::new(scaled, half_width, half_height))
             }
         }
