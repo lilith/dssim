@@ -33,6 +33,92 @@ mod portable {
     use imgref::*;
     use std::mem::MaybeUninit;
 
+    /// Interior row pass shared by `blur_h5` and `blur_v5`: plain 5-tap,
+    /// `r` ordered [-2, -1, 0, +1, +2] relative to the output element.
+    /// `#[inline(always)]` so the AVX2+FMA wrapper re-vectorizes this same
+    /// body under its target features instead of duplicating it.
+    #[inline(always)]
+    fn blur5_inner_inline(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        let [m2, m1, c, p1, p2] = r;
+        for j in 0..out.len() {
+            out[j].write(
+                (m2[j] + p2[j]) * K5_OUTER
+                + (m1[j] + p1[j]) * K5_INNER
+                + c[j] * K5_MID,
+            );
+        }
+    }
+
+    /// Interior row pass of `blur_h5_mul`: 5-tap over the element-wise
+    /// product of `r1` and `r2` (each ordered [-2, -1, 0, +1, +2]).
+    #[inline(always)]
+    fn blur5_mul_inner_inline(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        let [a_m2, a_m1, a_c, a_p1, a_p2] = r1;
+        let [b_m2, b_m1, b_c, b_p1, b_p2] = r2;
+        for j in 0..out.len() {
+            let pm2 = a_m2[j] * b_m2[j];
+            let pm1 = a_m1[j] * b_m1[j];
+            let pc  = a_c[j]  * b_c[j];
+            let pp1 = a_p1[j] * b_p1[j];
+            let pp2 = a_p2[j] * b_p2[j];
+            out[j].write((pm2 + pp2) * K5_OUTER + (pm1 + pp1) * K5_INNER + pc * K5_MID);
+        }
+    }
+
+    #[inline(never)]
+    fn blur5_inner_base(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        blur5_inner_inline(r, out);
+    }
+
+    #[inline(never)]
+    fn blur5_mul_inner_base(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        blur5_mul_inner_inline(r1, r2, out);
+    }
+
+    /// AVX2+FMA clone of `blur5_inner_base`; same source, vectorized wider.
+    /// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma")]
+    fn blur5_inner_avx2(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        blur5_inner_inline(r, out);
+    }
+
+    /// AVX2+FMA clone of `blur5_mul_inner_base`; same source, vectorized wider.
+    /// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma")]
+    fn blur5_mul_inner_avx2(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        blur5_mul_inner_inline(r1, r2, out);
+    }
+
+    /// Runtime dispatch, resolved once per row — a cached atomic load is
+    /// free next to a full row of work, and on statically-enabled builds
+    /// the check is a constant `true`.
+    #[inline]
+    fn blur5_inner(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx2_fma() {
+            // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+            unsafe { blur5_inner_avx2(r, out) };
+            return;
+        }
+        blur5_inner_base(r, out);
+    }
+
+    /// Runtime dispatch for the fused multiply row pass.
+    #[inline]
+    fn blur5_mul_inner(r1: [&[f32]; 5], r2: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx2_fma() {
+            // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
+            unsafe { blur5_mul_inner_avx2(r1, r2, out) };
+            return;
+        }
+        blur5_mul_inner_base(r1, r2, out);
+    }
+
     /// Horizontal 5-tap blur, bit-equivalent to two sequential clamped 1D
     /// 3-tap blurs. Edges (`j=0` and `j=w-1`) use the legacy-equivalent
     /// 3-coefficient form derived from H1·H1 clamping; `j=1` and `j=w-2`
@@ -86,20 +172,14 @@ mod portable {
             // bounds checks once per row and emits AVX2/NEON SIMD over the body.
             if width >= 5 {
                 let inner_len = width - 4;
-                let r_m2 = &row[..inner_len];
-                let r_m1 = &row[1..=inner_len];
-                let r_c  = &row[2..2 + inner_len];
-                let r_p1 = &row[3..3 + inner_len];
-                let r_p2 = &row[4..4 + inner_len];
-                let (_, out_rest) = out.split_at_mut(2);
-                let out_inner = &mut out_rest[..inner_len];
-                for j in 0..inner_len {
-                    out_inner[j].write(
-                        (r_m2[j] + r_p2[j]) * K5_OUTER
-                        + (r_m1[j] + r_p1[j]) * K5_INNER
-                        + r_c[j] * K5_MID,
-                    );
-                }
+                let r = [
+                    &row[..inner_len],
+                    &row[1..=inner_len],
+                    &row[2..2 + inner_len],
+                    &row[3..3 + inner_len],
+                    &row[4..4 + inner_len],
+                ];
+                blur5_inner(r, &mut out[2..2 + inner_len]);
             }
         }
     }
@@ -183,14 +263,7 @@ mod portable {
                 let rc  = row(y);
                 let rp1 = row(y + 1);
                 let rp2 = row(y + 2);
-                let out = &mut dst[y * dst_stride..][..width];
-                for x in 0..width {
-                    out[x].write(
-                        (rm2[x] + rp2[x]) * K5_OUTER
-                        + (rm1[x] + rp1[x]) * K5_INNER
-                        + rc[x] * K5_MID,
-                    );
-                }
+                blur5_inner([rm2, rm1, rc, rp1, rp2], &mut dst[y * dst_stride..][..width]);
             }
         }
     }
@@ -254,26 +327,21 @@ mod portable {
             // Interior: j ∈ [2, w-2). Build five pairs of aligned sub-slices.
             if width >= 5 {
                 let inner_len = width - 4;
-                let s1_m2 = &r1[..inner_len];
-                let s1_m1 = &r1[1..=inner_len];
-                let s1_c  = &r1[2..2 + inner_len];
-                let s1_p1 = &r1[3..3 + inner_len];
-                let s1_p2 = &r1[4..4 + inner_len];
-                let s2_m2 = &r2[..inner_len];
-                let s2_m1 = &r2[1..=inner_len];
-                let s2_c  = &r2[2..2 + inner_len];
-                let s2_p1 = &r2[3..3 + inner_len];
-                let s2_p2 = &r2[4..4 + inner_len];
-                let (_, out_rest) = out.split_at_mut(2);
-                let out_inner = &mut out_rest[..inner_len];
-                for j in 0..inner_len {
-                    let pm2 = s1_m2[j] * s2_m2[j];
-                    let pm1 = s1_m1[j] * s2_m1[j];
-                    let pc  = s1_c[j]  * s2_c[j];
-                    let pp1 = s1_p1[j] * s2_p1[j];
-                    let pp2 = s1_p2[j] * s2_p2[j];
-                    out_inner[j].write((pm2 + pp2) * K5_OUTER + (pm1 + pp1) * K5_INNER + pc * K5_MID);
-                }
+                let s1 = [
+                    &r1[..inner_len],
+                    &r1[1..=inner_len],
+                    &r1[2..2 + inner_len],
+                    &r1[3..3 + inner_len],
+                    &r1[4..4 + inner_len],
+                ];
+                let s2 = [
+                    &r2[..inner_len],
+                    &r2[1..=inner_len],
+                    &r2[2..2 + inner_len],
+                    &r2[3..3 + inner_len],
+                    &r2[4..4 + inner_len],
+                ];
+                blur5_mul_inner(s1, s2, &mut out[2..2 + inner_len]);
             }
         }
     }
@@ -372,6 +440,46 @@ mod portable {
         // SAFETY: blur_v5 wrote every cell.
         unsafe { dst_vec.set_len(pixels); }
         dst_vec
+    }
+
+    /// Scalar vs AVX2 parity for the dispatched interior kernels, over an
+    /// odd-length range so the SIMD tail is exercised.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn blur5_inner_dispatch_parity() {
+        if !crate::caps::has_avx2_fma() {
+            return;
+        }
+        let n = 253;
+        let src: Vec<f32> = (0..n + 4)
+            .map(|i| ((i as u32).wrapping_mul(747_796_405) >> 8) as f32 / 16_777_216.0)
+            .collect();
+        let src2: Vec<f32> = src.iter().map(|x| 1.0 - x).collect();
+        let r = [
+            &src[..n], &src[1..=n], &src[2..2 + n], &src[3..3 + n], &src[4..4 + n],
+        ];
+        let s = [
+            &src2[..n], &src2[1..=n], &src2[2..2 + n], &src2[3..3 + n], &src2[4..4 + n],
+        ];
+        let mut base = vec![MaybeUninit::<f32>::uninit(); n];
+        let mut avx2 = vec![MaybeUninit::<f32>::uninit(); n];
+        let mut base_mul = vec![MaybeUninit::<f32>::uninit(); n];
+        let mut avx2_mul = vec![MaybeUninit::<f32>::uninit(); n];
+        blur5_inner_base(r, &mut base);
+        blur5_mul_inner_base(r, s, &mut base_mul);
+        // SAFETY: has_avx2_fma() confirmed support above.
+        unsafe {
+            blur5_inner_avx2(r, &mut avx2);
+            blur5_mul_inner_avx2(r, s, &mut avx2_mul);
+        }
+        for j in 0..n {
+            let (a, b) = unsafe { (base[j].assume_init(), avx2[j].assume_init()) };
+            assert!((f64::from(a) - f64::from(b)).abs() < 1e-6,
+                "blur5_inner diverged at {j}: base={a} avx2={b}");
+            let (a, b) = unsafe { (base_mul[j].assume_init(), avx2_mul[j].assume_init()) };
+            assert!((f64::from(a) - f64::from(b)).abs() < 1e-6,
+                "blur5_mul_inner diverged at {j}: base={a} avx2={b}");
+        }
     }
 }
 
