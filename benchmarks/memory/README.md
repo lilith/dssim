@@ -78,6 +78,21 @@ At 2049 × 1024, fusion removes exactly 16 bytes/pixel from the one-worker Linux
 | mac | 4097x2048 | 6 | fused | 767.96 | 879.98 | 238.05 | 1122.30 |
 | mac | 4097x2048 | 6 | stream | 255.99 | 368.03 | 49.74 | 454.73 |
 
+## Public API audit for fusion
+
+Fusion is not API-neutral: it adds public ToLABBitmap implementations for ImgRef/ImgVec of qualifying GammaPixel types and Downsample implementations for 12 concrete integer pixel formats. Existing public function/trait signatures remain unchanged. The added ToRGB::Context associated type and parameter are crate-private. Some exported traits are doc(hidden); documentation visibility should not be confused with Rust privacy.
+
+On follow-up review, cargo-semver-checks 0.49.0 with rustc 1.98.1 compared fused bc02885 against the exact #197 head eb41ae3. Both dssim and dssim-core passed with default features and with no enabled features: 223 checks passed and 30 skipped in each run. This checks for known compatibility violations, not equality of public API surface, and is separate from the Rust 1.90 build/test validation above. Logs are in results/semver-fused-*.log.
+
+Commands, run from the fused checkout:
+
+```sh
+cargo semver-checks -p dssim-core -p dssim --baseline-rev eb41ae307bfda358e41c022df2e2956fe5fd868c --default-features
+cargo semver-checks -p dssim-core -p dssim --baseline-rev eb41ae307bfda358e41c022df2e2956fe5fd868c --only-explicit-features
+```
+
+If the intended scope requires no public API additions, the fused input path should instead use an internal adapter; the current production commits have not yet been changed to do that.
+
 ## Correctness and safety checks
 
 - Rust 1.90 release core tests with default features and with --no-default-features pass on Linux and Mac: 26 tests at fused, 30 at stream.
