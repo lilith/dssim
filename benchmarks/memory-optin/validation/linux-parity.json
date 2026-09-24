@@ -1,0 +1,22 @@
+[
+  {
+    "mode": "cc",
+    "bytes": 220370288,
+    "sha256": "99dcf2e16049bd1d0d9b5e14b1324286c3d9ea0bedc7f6f4a17fe7f2fddf4c98"
+  },
+  {
+    "mode": "cs",
+    "bytes": 220370288,
+    "sha256": "99dcf2e16049bd1d0d9b5e14b1324286c3d9ea0bedc7f6f4a17fe7f2fddf4c98"
+  },
+  {
+    "mode": "sc",
+    "bytes": 220370288,
+    "sha256": "99dcf2e16049bd1d0d9b5e14b1324286c3d9ea0bedc7f6f4a17fe7f2fddf4c98"
+  },
+  {
+    "mode": "ss",
+    "bytes": 220370288,
+    "sha256": "99dcf2e16049bd1d0d9b5e14b1324286c3d9ea0bedc7f6f4a17fe7f2fddf4c98"
+  }
+]

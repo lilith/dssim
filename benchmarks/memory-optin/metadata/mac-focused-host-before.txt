@@ -1,0 +1,32 @@
+Thu Sep 24 04:15:03 MDT 2026
+ 4:15  up 5 days,  8:35, 2 users, load averages: 2.74 3.44 3.38
+hw.model: Mac16,11
+hw.memsize: 25769803776
+hw.perflevel0.physicalcpu: 8
+hw.perflevel1.physicalcpu: 4
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   136937.
+Pages active:                                 627633.
+Pages inactive:                               622674.
+Pages speculative:                              4710.
+Pages throttled:                                   0.
+Pages wired down:                             111953.
+Pages purgeable:                                7070.
+"Translation faults":                      675158477.
+Pages copy-on-write:                        25184612.
+Pages zero filled:                         413552405.
+Pages reactivated:                            410087.
+Pages purged:                                1352999.
+File-backed pages:                            711180.
+Anonymous pages:                              543837.
+Pages stored in compressor:                   105830.
+Pages occupied by compressor:                  35158.
+Decompressions:                                92323.
+Compressions:                                 298148.
+Pageins:                                    20056582.
+Pageouts:                                        533.
+Swapins:                                           0.
+Swapouts:                                          0.

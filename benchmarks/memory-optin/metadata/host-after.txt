@@ -1,0 +1,28 @@
+Thu Sep 24 03:26:17 MDT 2026
+ 3:26  up 5 days,  7:47, 2 users, load averages: 4.69 3.32 2.11
+Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                   243209.
+Pages active:                                 562560.
+Pages inactive:                               572204.
+Pages speculative:                             15333.
+Pages throttled:                                   0.
+Pages wired down:                             109715.
+Pages purgeable:                                3820.
+"Translation faults":                      633549064.
+Pages copy-on-write:                        24136457.
+Pages zero filled:                         385613203.
+Pages reactivated:                            406960.
+Pages purged:                                1343165.
+File-backed pages:                            642965.
+Anonymous pages:                              507132.
+Pages stored in compressor:                   108810.
+Pages occupied by compressor:                  36044.
+Decompressions:                                88984.
+Compressions:                                 298148.
+Pageins:                                    16712074.
+Pageouts:                                        527.
+Swapins:                                           0.
+Swapouts:                                          0.

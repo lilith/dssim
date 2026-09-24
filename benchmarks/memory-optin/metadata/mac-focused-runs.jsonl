@@ -1,0 +1,14 @@
+{"case": "512x512-t6-rgba8-candidate-newcc-r1", "attempt": 1, "start": 1790244903.73006, "end": 1790244904.210978, "other_cpu_max": 0, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r1", "attempt": 1, "start": 1790244904.232001, "end": 1790244904.713293, "other_cpu_max": 9.0, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r2", "attempt": 1, "start": 1790244904.734487, "end": 1790244905.216811, "other_cpu_max": 9.2, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-newcc-r2", "attempt": 1, "start": 1790244909.322867, "end": 1790244909.808078, "other_cpu_max": 5.9, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-newcc-r3", "attempt": 1, "start": 1790244909.82891, "end": 1790244910.312712, "other_cpu_max": 0, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r3", "attempt": 1, "start": 1790244910.3348129, "end": 1790244910.817549, "other_cpu_max": 0, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r4", "attempt": 1, "start": 1790244910.8394828, "end": 1790244911.323083, "other_cpu_max": 7.6, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-newcc-r4", "attempt": 1, "start": 1790244911.344264, "end": 1790244911.825496, "other_cpu_max": 5.0, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-newcc-r5", "attempt": 1, "start": 1790244911.8473349, "end": 1790244912.328883, "other_cpu_max": 3.8000000000000003, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r5", "attempt": 1, "start": 1790244912.350069, "end": 1790244912.831624, "other_cpu_max": 36.5, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r6", "attempt": 1, "start": 1790244912.853308, "end": 1790244913.337047, "other_cpu_max": 7.6000000000000005, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-newcc-r6", "attempt": 1, "start": 1790244913.3579378, "end": 1790244913.8437078, "other_cpu_max": 8.6, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-newcc-r7", "attempt": 1, "start": 1790244913.864643, "end": 1790244914.34602, "other_cpu_max": 13.7, "noisy": false}
+{"case": "512x512-t6-rgba8-candidate-oldcc-r7", "attempt": 1, "start": 1790244914.367008, "end": 1790244914.8474, "other_cpu_max": 5.3, "noisy": false}

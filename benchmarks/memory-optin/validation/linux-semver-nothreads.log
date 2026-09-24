@@ -1,0 +1,25 @@
+     Cloning eb41ae307bfda358e41c022df2e2956fe5fd868c
+    Building dssim v3.5.1 (current)
+       Built [   0.361s] (current)
+     Parsing dssim v3.5.1 (current)
+      Parsed [   0.001s] (current)
+    Building dssim v3.5.1 (baseline)
+       Built [   0.231s] (baseline)
+     Parsing dssim v3.5.1 (baseline)
+      Parsed [   0.001s] (baseline)
+    Checking dssim v3.5.1 -> v3.5.1 (no change; assume patch)
+     Checked [   0.002s] 223 checks: 223 pass, 30 skip
+     Summary no semver update required
+    Finished [   1.080s] dssim
+    Building dssim-core v3.5.1 (current)
+       Built [   0.223s] (current)
+     Parsing dssim-core v3.5.1 (current)
+      Parsed [   0.002s] (current)
+    Building dssim-core v3.5.1 (baseline)
+       Built [   0.226s] (baseline)
+     Parsing dssim-core v3.5.1 (baseline)
+      Parsed [   0.002s] (baseline)
+    Checking dssim-core v3.5.1 -> v3.5.1 (no change; assume patch)
+     Checked [   0.002s] 223 checks: 223 pass, 30 skip
+     Summary no semver update required
+    Finished [   0.754s] dssim-core
