@@ -1,0 +1,1 @@
+2049x1024 t=1: create 96.40 ms, compare 22.13 ms, peak 248 MB, ssim=0.338437

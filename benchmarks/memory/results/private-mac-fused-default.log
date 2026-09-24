@@ -1,0 +1,33 @@
+   Compiling dssim-core v3.5.1 (/private/tmp/dssim-memory-fused/dssim-core)
+    Finished `release` profile [optimized] target(s) in 12.24s
+     Running unittests src/lib.rs (target/release/deps/dssim_core-f3cd82280a17bb3d)
+
+running 26 tests
+test blur::blur_1x1 ... ok
+test blur::blur_two ... ok
+test blur::blur_one ... ok
+test blur::blur_one_stride ... ok
+test blur::blur_zero ... ok
+test blur::equiv_tests::equiv_constant_50 ... ok
+test blur::equiv_tests::equiv_impulse ... ok
+test blur::equiv_tests::equiv_constant_zero ... ok
+test blur::equiv_tests::equiv_linear_gradient ... ok
+test blur::equiv_tests::equiv_step_edge ... ok
+test blur::equiv_tests::equiv_strided_subimage ... ok
+test blur::equiv_tests::equiv_random_uniform ... ok
+test blur::equiv_tests::equiv_tiny_sizes ... ok
+test blur::portable::dispatch_tests::blur_rows_are_bit_exact_across_tiers ... ok
+test dssim::dispatch_tests::ssim3_is_bit_exact_across_tiers ... ok
+test image::dispatch_tests::downsample_is_bit_exact_across_tiers ... ok
+test tolab::cbrts2 ... ok
+test tolab::dispatch_tests::gray_rows_are_bit_exact_across_tiers ... ok
+test tolab::cbrts1 ... ok
+test tolab::dispatch_tests::rgb_rows_are_bit_exact_across_tiers ... ok
+test tolab::dispatch_tests::grayscale_lab_ignores_row_padding ... ok
+test dssim::poison ... ok
+test dssim::ssim_maps_scale_order ... ok
+test dssim::png_compare ... ok
+test dssim::ssim_locked_values ... ok
+test tolab::fused_tests::fused_integer_inputs_match_materialized_bits ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s

@@ -1,0 +1,72 @@
+    Blocking waiting for file lock on package cache
+     Locking 2 packages to latest Rust 1.90 compatible versions
+      Adding imgref v1.12.3
+      Adding load_image v3.4.1
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling dssim-core v3.5.1 (/tmp/dssim-memory-stream/dssim-core)
+   Compiling dssim v3.5.1 (/tmp/dssim-memory-stream)
+    Finished `release` profile [optimized] target(s) in 11.86s
+     Running unittests src/lib.rs (target/release/deps/dssim-782e7be4c2b654a4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/release/deps/dssim-613954197161f23d)
+
+running 4 tests
+test rgblu_input ... ok
+test image_gray ... ok
+test image_load1 ... ok
+test image_gray_profile ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (target/release/deps/dssim_core-184a477ea1eb87cf)
+
+running 30 tests
+test blur::blur_1x1 ... ok
+test blur::blur_one ... ok
+test blur::blur_one_stride ... ok
+test blur::blur_zero ... ok
+test blur::blur_two ... ok
+test blur::equiv_tests::equiv_constant_zero ... ok
+test blur::equiv_tests::equiv_constant_50 ... ok
+test blur::equiv_tests::equiv_impulse ... ok
+test blur::portable::dispatch_tests::blur_rows_are_bit_exact_across_tiers ... ok
+test blur::equiv_tests::equiv_tiny_sizes ... ok
+test blur::moments::tests::moment_rows_match_all_supported_tiers ... ok
+test blur::equiv_tests::equiv_linear_gradient ... ok
+test blur::equiv_tests::equiv_strided_subimage ... ok
+test dssim::rows::ssim1_tiers_are_bit_exact ... ok
+test blur::equiv_tests::equiv_step_edge ... ok
+test tolab::cbrts1 ... ok
+test blur::equiv_tests::equiv_random_uniform ... ok
+test image::dispatch_tests::downsample_is_bit_exact_across_tiers ... ok
+test tolab::cbrts2 ... ok
+test tolab::dispatch_tests::gray_rows_are_bit_exact_across_tiers ... ok
+test tolab::dispatch_tests::rgb_rows_are_bit_exact_across_tiers ... ok
+test dssim::dispatch_tests::ssim3_is_bit_exact_across_tiers ... ok
+test tolab::dispatch_tests::grayscale_lab_ignores_row_padding ... ok
+test dssim::poison ... ok
+test dssim::memory_tests::fused_compare_identical_is_one ... ok
+test dssim::memory_tests::fused_compare_bitexact_vs_plane_path ... ok
+test dssim::png_compare ... ok
+test dssim::ssim_locked_values ... ok
+test dssim::ssim_maps_scale_order ... ok
+test tolab::fused_tests::fused_integer_inputs_match_materialized_bits ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+   Doc-tests dssim
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests dssim_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

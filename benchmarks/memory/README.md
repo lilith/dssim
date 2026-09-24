@@ -1,16 +1,16 @@
 # Memory reductions above PR #197
 
-Two independently reviewable commits, measured against the exact dispatch-only PR head. Results collected 2026-09-23.
+Two independently reviewable commits above the exact dispatch-only PR head. Results collected 2026-09-23. The current revisions use a private adapter and do not add public integer-image trait implementations. Historical timing tables below remain explicitly tied to the earlier revisions; parity, tests, compatibility and one-worker allocation measurements were rerun on the private-adapter revisions.
 
 | Version | Commit | Scope |
 | --- | --- | --- |
 | base | eb41ae307bfda358e41c022df2e2956fe5fd868c | PR #197; parent is upstream main 0e44c9b7fe91a5265c8e463436c28512186fe9cd |
-| fused | bc028852b1c6ba0c192ddbb77b924eda1e530f9b | Fuse integer gamma conversion into dispatched Lab rows |
-| stream | 04a3f2b6803948cce6769d49a0481841c2087a15 | On fused: retain image planes and stream comparison moments |
+| fused | 27a478073263aef6fad9b095c466dc77a1b85033 | Fuse RGB8/RGBA8 conversion through a private adapter |
+| stream | 22e9ab033d5e5ac41ee961de00e7ae9bd959b634 | On fused: retain image planes and stream comparison moments |
 
 ## Review boundaries
 
-**Fusion** removes the full-resolution linear pixel buffer from integer image creation and decoded image loading. The existing private ToRGB trait receives an associated Context: Sync: () for linear pixels, the existing lookup table for integer pixels. This passes the table through the shared scalar row body and its existing feature-dispatched clones, without a LabConv abstraction or duplicated arithmetic. Downsampling converts integer pixels to linear before averaging. Existing alpha behavior, dither and cube-root polynomial stay unchanged. Audit size: 7 files, 229 insertions, 41 deletions including tests.
+**Fusion** removes the full-resolution linear pixel buffer from the existing create_image_rgb/create_image_rgba methods and RGB8/RGBA8 decoded image loading. A crate-private GammaImage view implements ToLABBitmap and Downsample internally. There are no new implementations for public integer-pixel ImgRef/ImgVec types. The separate loader crate uses the existing public methods; its 16-bit and grayscale paths retain the original materialized conversion. The existing private ToRGB trait receives an associated Context: Sync: () for linear pixels, the existing lookup table for integer pixels. This passes the table through the shared scalar row body and its existing feature-dispatched clones, without a LabConv abstraction or duplicated arithmetic. Downsampling converts integer pixels to linear before averaging. Existing alpha behavior, dither and cube-root polynomial stay unchanged. Audit size: 7 files, 192 insertions, 35 deletions including tests.
 
 **Streaming** retains only image planes instead of three cached planes per channel/scale. Comparison computes five moments using initialized row buffers: a five-row horizontal ring and vertical scratch, in 16-output-row blocks. Chroma preblur and the original sequential score reductions remain. Full output maps still exist; this is not a fully streaming public API. Six new unsafe call sites only enter runtime/static-feature-checked target-feature functions. There are no new raw-pointer memory operations, MaybeUninit, set_len or row-writer abstractions. Independent original full-plane blur routines remain under cfg(test) as a numerical oracle. Audit size: 7 files, 661 insertions, 177 deletions including tests.
 
@@ -23,6 +23,10 @@ Rust 1.90.0; portable generic builds with opt-level=3, fat LTO, 16 codegen units
 All pixels are generated before timing; no decoding, file I/O or codecs are timed. Each case warms for 30 ms, then measures nine batches of at least 60 ms. Tables show the range of the two run medians, with variant order reversed for the second round. The raw CSVs include within-run min/max. Linux six-worker preparation results are noisy; do not treat their ratios as precise.
 
 `rgba8_pair_compare` prepares one RGBA8 image and one RGB8 image and compares them. `prepare_pair_compare` uses an already-linear RGBLU/RGBAPLU pair. `compare` borrows an already-prepared linear pair, with no deep clone or preparation charged. Do not add separately measured phase times to estimate repeated-comparison break-even: allocation reuse differs between these cases.
+
+## Historical performance revisions
+
+The timing and full memory tables below were measured on fused bc028852b1c6ba0c192ddbb77b924eda1e530f9b and stream 04a3f2b6803948cce6769d49a0481841c2087a15. They are retained at fork branch bench/memory-197-public-impls. These are not fresh timing measurements of the private-adapter revision. The measured RGB8/RGBA8 and linear workloads retain the same arithmetic and allocation strategy; the broader old fusion for 16-bit/grayscale loader inputs has been removed. Fresh memory validation for the new revisions is listed below.
 
 ## Timings, 2049 × 1024
 
@@ -78,20 +82,22 @@ At 2049 × 1024, fusion removes exactly 16 bytes/pixel from the one-worker Linux
 | mac | 4097x2048 | 6 | fused | 767.96 | 879.98 | 238.05 | 1122.30 |
 | mac | 4097x2048 | 6 | stream | 255.99 | 368.03 | 49.74 | 454.73 |
 
-## Public API audit for fusion
+## Private adapter follow-up validation
 
-Fusion is not API-neutral: it adds public ToLABBitmap implementations for ImgRef/ImgVec of qualifying GammaPixel types and Downsample implementations for 12 concrete integer pixel formats. Existing public function/trait signatures remain unchanged. The added ToRGB::Context associated type and parameter are crate-private. Some exported traits are doc(hidden); documentation visibility should not be confused with Rust privacy.
+The public integer-image ToLABBitmap and Downsample implementations have been removed. GammaImage is crate-private, and the added ToRGB::Context associated type and parameter remain crate-private. Existing public function and trait signatures are unchanged. The source-level change also eliminates the concrete-format downsampling macro: one generic implementation on the private adapter is sufficient.
 
-On follow-up review, cargo-semver-checks 0.49.0 with rustc 1.98.1 compared fused bc02885 against the exact #197 head eb41ae3. Both dssim and dssim-core passed with default features and with no enabled features: 223 checks passed and 30 skipped in each run. This checks for known compatibility violations, not equality of public API surface, and is separate from the Rust 1.90 build/test validation above. Logs are in results/semver-fused-*.log.
+Both current production revisions passed cargo-semver-checks 0.49.0 with rustc 1.98.1, comparing dssim and dssim-core against #197 eb41ae3 with default features and with no enabled features: 223 checks passed and 30 skipped per crate/configuration. This detects known compatibility violations; it is not by itself proof of API equality. Logs: results/private-*-semver-*.log. The original public-implementation audit logs remain as historical evidence.
 
-Commands, run from the fused checkout:
+Commands, run from each current production checkout:
 
 ```sh
 cargo semver-checks -p dssim-core -p dssim --baseline-rev eb41ae307bfda358e41c022df2e2956fe5fd868c --default-features
 cargo semver-checks -p dssim-core -p dssim --baseline-rev eb41ae307bfda358e41c022df2e2956fe5fd868c --only-explicit-features
 ```
 
-If the intended scope requires no public API additions, the fused input path should instead use an internal adapter; the current production commits have not yet been changed to do that.
+Rust 1.90 tests were rerun on both revisions with and without threads: Linux workspace tests (four root tests and 26/30 core tests), Mac core tests (26/30). The full 220,370,288-byte parity corpus and scalar score outputs were compared with #197 again on each host; both revisions match byte-for-byte and retain the per-host hashes below. Locked score probes still report 0.338437.
+
+Fresh one-worker, 2049 × 1024 allocation runs on Linux and Mac confirm the exact same prepared-pair, preparation-peak and comparison-scratch heap counts as the historical measurements. Fusion still saves 33,570,816 bytes of preparation peak heap, and streaming retains about 64 MiB instead of 192 MiB per prepared pair. Raw fresh data: results/private-*-memory-*.csv and .rss. Repeated-comparison costs and historical timing caveats still apply; timing was not remeasured for this API-only restructuring.
 
 ## Correctness and safety checks
 
@@ -107,7 +113,7 @@ If the intended scope requires no public API additions, the fused input path sho
 
 ## Reproduction
 
-This directory is a standalone Cargo workspace with a relative dependency on this checkout's dssim-core. For the exact three-way comparison, prepare separate worktrees/harnesses, then build each:
+This directory is a standalone Cargo workspace with a relative dependency on this checkout's dssim-core. For the current private-adapter revisions, prepare separate worktrees/harnesses, then build each. To reproduce the historical tables, add --historical to prepare.py:
 
 ```sh
 python3 benchmarks/memory/prepare.py /tmp/memory-review
