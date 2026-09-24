@@ -25,7 +25,7 @@ for version, commit in versions.items():
     subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '--detach', str(checkout), commit], check=True)
     harness = root / version
     harness.mkdir()
-    for name in ['Cargo.toml', 'Cargo.lock', 'bench.rs', 'parity.rs', 'memory.rs', 'score.rs']:
+    for name in ['Cargo.toml', 'Cargo.lock', 'bench.rs', 'borrowed.rs', 'parity.rs', 'memory.rs', 'score.rs']:
         shutil.copy2(source / name, harness / name)
     manifest = harness / 'Cargo.toml'
     # POSIX paths; TOML literal string avoids escaping spaces/backslashes.

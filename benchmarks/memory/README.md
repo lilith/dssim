@@ -24,6 +24,32 @@ All pixels are generated before timing; no decoding, file I/O or codecs are time
 
 `rgba8_pair_compare` prepares one RGBA8 image and one RGB8 image and compares them. `prepare_pair_compare` uses an already-linear RGBLU/RGBAPLU pair. `compare` borrows an already-prepared linear pair, with no deep clone or preparation charged. Do not add separately measured phase times to estimate repeated-comparison break-even: allocation reuse differs between these cases.
 
+## Current shared-reference comparison timings
+
+Fresh measurements on #197 eb41ae3 versus the current private-adapter + streaming revision 22e9ab0. This isolates `compare(&original, &modified)` for the same already-prepared RGBLU/RGBAPLU pair, 2049 × 1024. Both images are borrowed; no deep clone, preparation, decoding or input generation is timed. SSIM maps are not requested. This is repeated comparison of a fixed pair, not a rotating collection of candidate images.
+
+Rust 1.90, generic portable build and allocator/affinity settings as above. The harness is the original bench.rs with a filter in measure() to time only compare_2049x1024. Three runs, alternating version order; each run retains the nine-batch measurement scheme. Table values are medians of the three run medians. Parentheses show the range of those run medians. Positive change means slower. Linux six-worker baseline timing is noisy; its precise percentage is less certain than the direction.
+
+| Host | Workers | #197, ms | Streaming, ms | Time change |
+| --- | ---: | ---: | ---: | ---: |
+| linux | 1 | 12.66 (12.65–13.47) | 19.40 (19.14–19.52) | +53.3% |
+| linux | 6 | 10.37 (9.38–10.95) | 5.56 (5.51–5.61) | -46.4% |
+| mac | 1 | 10.94 (10.90–10.98) | 24.73 (24.71–24.75) | +126.1% |
+| mac | 6 | 4.91 (4.90–4.92) | 6.75 (6.73–6.82) | +37.5% |
+
+The cost comes from discarding cached means and squared moments in the streaming commit, not from passing references or from the private input adapter. The first fusion commit does not change the comparison algorithm. For workloads dominated by repeated comparisons of prepared images, retain that distinction when reviewing the two commits; the memory tradeoff in the second commit is substantial.
+
+Reproduce with the current revisions prepared by prepare.py:
+
+```sh
+for version in base stream; do
+  cargo +1.90.0 build --release --locked --manifest-path /tmp/memory-review/$version/Cargo.toml --bin borrowed
+done
+python3 benchmarks/memory/run-borrowed.py /tmp/memory-review
+```
+
+Raw observations: results/borrowed-*.csv. Earlier whole-pipeline timing tables remain historical; they were not rerun during this focused comparison check.
+
 ## Historical performance revisions
 
 The timing and full memory tables below were measured on fused bc028852b1c6ba0c192ddbb77b924eda1e530f9b and stream 04a3f2b6803948cce6769d49a0481841c2087a15. They are retained at fork branch bench/memory-197-public-impls. These are not fresh timing measurements of the private-adapter revision. The measured RGB8/RGBA8 and linear workloads retain the same arithmetic and allocation strategy; the broader old fusion for 16-bit/grayscale loader inputs has been removed. Fresh memory validation for the new revisions is listed below.
@@ -97,7 +123,7 @@ cargo semver-checks -p dssim-core -p dssim --baseline-rev eb41ae307bfda358e41c02
 
 Rust 1.90 tests were rerun on both revisions with and without threads: Linux workspace tests (four root tests and 26/30 core tests), Mac core tests (26/30). The full 220,370,288-byte parity corpus and scalar score outputs were compared with #197 again on each host; both revisions match byte-for-byte and retain the per-host hashes below. Locked score probes still report 0.338437.
 
-Fresh one-worker, 2049 × 1024 allocation runs on Linux and Mac confirm the exact same prepared-pair, preparation-peak and comparison-scratch heap counts as the historical measurements. Fusion still saves 33,570,816 bytes of preparation peak heap, and streaming retains about 64 MiB instead of 192 MiB per prepared pair. Raw fresh data: results/private-*-memory-*.csv and .rss. Repeated-comparison costs and historical timing caveats still apply; timing was not remeasured for this API-only restructuring.
+Fresh one-worker, 2049 × 1024 allocation runs on Linux and Mac confirm the exact same prepared-pair, preparation-peak and comparison-scratch heap counts as the historical measurements. Fusion still saves 33,570,816 bytes of preparation peak heap, and streaming retains about 64 MiB instead of 192 MiB per prepared pair. Raw fresh data: results/private-*-memory-*.csv and .rss. Repeated-comparison costs and historical timing caveats still apply; the subsequent focused shared-reference rerun is documented above.
 
 ## Correctness and safety checks
 
