@@ -1,0 +1,54 @@
+   Compiling crossbeam-utils v0.8.22
+   Compiling crossbeam-epoch v0.9.20
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+   Compiling libc v0.2.189
+   Compiling crc32fast v1.5.1
+   Compiling zlib-rs v0.6.7
+   Compiling either v1.18.0
+   Compiling bytemuck v1.25.2
+   Compiling cfg-if v1.0.4
+   Compiling imgref v1.12.3
+   Compiling itertools v0.15.0
+   Compiling rgb v0.8.53
+   Compiling flate2 v1.1.10
+   Compiling lodepng v3.12.2
+   Compiling rayon v1.12.0
+   Compiling dssim-core v3.5.1 (/private/tmp/dssim-memory-modes/dssim-core)
+    Finished `release` profile [optimized] target(s) in 13.24s
+     Running unittests src/lib.rs (target/release/deps/dssim_core-f3cd82280a17bb3d)
+
+running 31 tests
+test blur::blur_1x1 ... ok
+test blur::blur_zero ... ok
+test blur::blur_one ... ok
+test blur::blur_one_stride ... ok
+test blur::blur_two ... ok
+test blur::equiv_tests::equiv_constant_zero ... ok
+test blur::equiv_tests::equiv_linear_gradient ... ok
+test blur::equiv_tests::equiv_constant_50 ... ok
+test blur::equiv_tests::equiv_step_edge ... ok
+test blur::equiv_tests::equiv_impulse ... ok
+test blur::equiv_tests::equiv_strided_subimage ... ok
+test blur::equiv_tests::equiv_random_uniform ... ok
+test blur::equiv_tests::equiv_tiny_sizes ... ok
+test blur::portable::dispatch_tests::blur_rows_are_bit_exact_across_tiers ... ok
+test dssim::rows::ssim1_tiers_are_bit_exact ... ok
+test blur::moments::tests::moment_rows_match_all_supported_tiers ... ok
+test dssim::dispatch_tests::ssim3_is_bit_exact_across_tiers ... ok
+test image::dispatch_tests::downsample_is_bit_exact_across_tiers ... ok
+test tolab::cbrts1 ... ok
+test tolab::cbrts2 ... ok
+test tolab::dispatch_tests::gray_rows_are_bit_exact_across_tiers ... ok
+test tolab::dispatch_tests::grayscale_lab_ignores_row_padding ... ok
+test dssim::poison ... ok
+test tolab::dispatch_tests::rgb_rows_are_bit_exact_across_tiers ... ok
+test dssim::memory_tests::fused_compare_identical_is_one ... ok
+test dssim::memory_tests::storage_policy_affects_only_new_images_and_preserves_results ... ok
+test dssim::memory_tests::fused_compare_bitexact_vs_plane_path ... ok
+test dssim::ssim_maps_scale_order ... ok
+test dssim::ssim_locked_values ... ok
+test dssim::png_compare ... ok
+test tolab::fused_tests::fused_integer_inputs_match_materialized_bits ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s

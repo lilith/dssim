@@ -1,0 +1,3 @@
+case,median_ns,min_ns,max_ns
+compare_2049x1024,5668083.4,5641314.4,5767227.3
+candidate_create_compare_2049x1024,7817687.5,7638724.0,7924593.8
