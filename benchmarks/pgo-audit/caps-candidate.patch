@@ -1,0 +1,22 @@
+diff --git a/dssim-core/src/caps.rs b/dssim-core/src/caps.rs
+index faa34f8..6361d6a 100644
+--- a/dssim-core/src/caps.rs
++++ b/dssim-core/src/caps.rs
+@@ -4,7 +4,7 @@
+ 
+ /// Whether the CPU supports AVX2 + FMA. Resolved once, then cached.
+ #[cfg(target_arch = "x86_64")]
+-#[inline]
++#[inline(always)]
+ pub(crate) fn has_avx2_fma() -> bool {
+     // Statically enabled features need neither runtime detection nor a cache.
+     #[cfg(all(target_feature = "avx2", target_feature = "fma"))]
+@@ -31,7 +31,7 @@ pub(crate) fn has_avx2_fma() -> bool {
+ /// Whether AVX2/FMA and AVX-512 F/BW/DQ/VL are available. This is the
+ /// exact feature set of the clones, not the complete psABI v4 feature set.
+ #[cfg(target_arch = "x86_64")]
+-#[inline]
++#[inline(always)]
+ pub(crate) fn has_avx512() -> bool {
+     // Statically enabled features need neither runtime detection nor a cache.
+     #[cfg(all(

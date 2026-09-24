@@ -1,0 +1,13 @@
+diff --git a/dssim-core/src/dssim.rs b/dssim-core/src/dssim.rs
+index 8a8d9ce..4a61419 100644
+--- a/dssim-core/src/dssim.rs
++++ b/dssim-core/src/dssim.rs
+@@ -367,7 +367,7 @@ impl Dssim {
+         let c2: f32 = 0.03 * 0.03;
+         let inv3: f32 = 1.0 / 3.0;
+ 
+-        let map_out: Vec<f32> = (0..pixels).into_par_iter().with_min_len(1 << 10).map(|i| {
++        let map_out: Vec<f32> = (0..pixels).into_par_iter().with_min_len(1 << 10).map(#[inline(always)] |i| {
+             let mu1_0 = o0_mu[i]; let mu2_0 = m0_mu[i];
+             let mu1_1 = o1_mu[i]; let mu2_1 = m1_mu[i];
+             let mu1_2 = o2_mu[i]; let mu2_2 = m2_mu[i];
