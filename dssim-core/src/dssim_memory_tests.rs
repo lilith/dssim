@@ -131,21 +131,26 @@ fn fused_compare_identical_is_one() {
 
 
 #[test]
-fn storage_policy_affects_only_new_images_and_preserves_results() {
+fn construction_caching_is_opt_in_and_preserves_results() {
     let (w, h) = (33, 35);
     let pixels: Vec<_> = (0..w*h).map(|i| RGB::new((i*13) as u8, (i*31) as u8, (i*7) as u8)).collect();
     let changed: Vec<_> = pixels.iter().map(|p| RGB::new(p.r.wrapping_add(9), p.g, p.b)).collect();
     let mut d = Dssim::new();
     d.set_save_ssim_maps(8);
-    let cached = d.create_image_rgb(&pixels, w, h).unwrap();
-    let cached_changed = d.create_image_rgb(&changed, w, h).unwrap();
-    d.set_low_memory(true);
     let small = d.create_image_rgb(&pixels, w, h).unwrap();
     let small_changed = d.create_image_rgb(&changed, w, h).unwrap();
-    d.set_low_memory(false);
-    let again = d.create_image_rgb(&pixels, w, h).unwrap();
-    for (image, cached) in [(&cached, true), (&cached_changed, true), (&small, false), (&small_changed, false), (&again, true)] {
-        assert!(image.scale.iter().flat_map(|s| &s.chan).all(|c| c.moments.is_some() == cached));
+    assert!(small.scale.iter().chain(&small_changed.scale).flat_map(|s| &s.chan).all(|c| c.moments.is_none()));
+    let options = ImageOptions::default().cache_moments(true);
+    let cached = d.create_image_rgb_with_options(&pixels, w, h, options).unwrap();
+    let cached_changed = d.create_image_rgb_with_options(&changed, w, h, options).unwrap();
+    for image in [&cached, &cached_changed] {
+        assert!(image.scale.iter().flat_map(|s| &s.chan).all(|c| c.moments.is_some()));
+    }
+    // Opting in for one construction must not change subsequent defaults.
+    let later = d.create_image_rgb(&pixels, w, h).unwrap();
+    let disabled = d.create_image_rgb_with_options(&pixels, w, h, options.cache_moments(false)).unwrap();
+    for image in [&later, &disabled] {
+        assert!(image.scale.iter().flat_map(|s| &s.chan).all(|c| c.moments.is_none()));
     }
     let fingerprint = |a: &DssimImage<f32>, b: &DssimImage<f32>| {
         let (score, maps) = d.compare(a, b);
@@ -153,8 +158,8 @@ fn storage_policy_affects_only_new_images_and_preserves_results() {
             m.ssim.to_bits(), m.map.pixels().map(f32::to_bits).collect::<Vec<_>>()
         )).collect::<Vec<_>>())
     };
-    let expected = fingerprint(&cached, &cached_changed);
-    for a in [&cached, &small, &again] {
+    let expected = fingerprint(&small, &small_changed);
+    for a in [&cached, &small, &later, &disabled] {
         for b in [&cached_changed, &small_changed] {
             assert_eq!(fingerprint(a, b), expected);
         }
