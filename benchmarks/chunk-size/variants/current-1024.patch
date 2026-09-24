@@ -1,0 +1,19 @@
+--- current-original.rs
++++ current-1024.rs
+@@ -119,12 +119,12 @@
+                 sq2: std::array::from_fn(|c| moments(c, 3)),
+                 i12: std::array::from_fn(|c| moments(c, 4)),
+             };
+-            out.as_mut_slice().par_chunks_mut(4096).enumerate().for_each(|(i, chunk)| {
+-                ssim3_range(&inputs, i * 4096, chunk);
++            out.as_mut_slice().par_chunks_mut(1024).enumerate().for_each(|(i, chunk)| {
++                ssim3_range(&inputs, i * 1024, chunk);
+             });
+         } else {
+-            out.as_mut_slice().par_chunks_mut(4096).enumerate().for_each(|(i, chunk)| {
+-                let start = i * 4096;
++            out.as_mut_slice().par_chunks_mut(1024).enumerate().for_each(|(i, chunk)| {
++                let start = i * 1024;
+                 ssim1_range(std::array::from_fn(|p| &moments(0, p)[start..][..chunk.len()]), chunk);
+             });
+         }

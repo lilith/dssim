@@ -1,0 +1,24 @@
+[package]
+name = "review-bench"
+version = "0.0.0"
+edition = "2024"
+[workspace]
+[dependencies]
+dssim-core = { path = "../source-modes/dssim-core" }
+imgref = "=1.12.3"
+rgb = "=0.8.53"
+[[bin]]
+name = "review-bench"
+path = "bench.rs"
+
+[features]
+modes = []
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 16
+panic = "abort"
+
+[[bin]]
+name = "parity"
+path = "parity.rs"

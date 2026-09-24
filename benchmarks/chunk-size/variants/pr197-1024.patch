@@ -1,0 +1,11 @@
+--- pr197-original.rs
++++ pr197-1024.rs
+@@ -428,7 +428,7 @@
+ /// keeps work-stealing granularity close to the old `with_min_len(1<<10)`
+ /// split while giving each kernel call a run long enough to amortize the
+ /// capability check.
+-const SSIM3_CHUNK: usize = 1 << 12;
++const SSIM3_CHUNK: usize = 1024;
+
+ /// Flat per-pixel inputs to the 3-channel SSIM map kernel: blurred means,
+ /// blurred squared-image means, and cross-blurred products for each of the
