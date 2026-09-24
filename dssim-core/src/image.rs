@@ -3,7 +3,9 @@
 
 #![allow(dead_code)]
 
+use crate::linear::{GammaComponent, GammaPixel};
 use imgref::*;
+use rgb::alt::*;
 use rgb::*;
 
 /// RGBA, but: premultiplied alpha, linear (using sRGB primaries, but not its gamma curve), f32 unit scale 0..1
@@ -160,17 +162,21 @@ impl Average4 for RGBLU {
 }
 
 pub(crate) trait ToRGB {
-    fn to_rgb(self, n: usize) -> RGBLU;
+    /// A shared gamma lookup table, or `()` for already-linear pixels.
+    type Context: Sync;
+    fn to_rgb(self, n: usize, context: &Self::Context) -> RGBLU;
 }
 
 impl ToRGB for RGBLU {
+    type Context = ();
     #[inline(always)]
-    fn to_rgb(self, _n: usize) -> RGBLU { self }
+    fn to_rgb(self, _n: usize, _: &()) -> RGBLU { self }
 }
 
 impl ToRGB for RGBAPLU {
+    type Context = ();
     #[inline(always)]
-    fn to_rgb(self, n: usize) -> RGBLU {
+    fn to_rgb(self, n: usize, _: &()) -> RGBLU {
         // Bit tests only read bits <32; u32 keeps vectorized compares in
         // 32-bit lanes instead of usize-wide ones.
         let n = n as u32;
@@ -190,6 +196,19 @@ impl ToRGB for RGBAPLU {
         }
 
         RGBLU { r, g, b }
+    }
+}
+
+impl<P> ToRGB for P
+where
+    P: GammaPixel<Output = RGBAPLU>,
+    <P::Component as GammaComponent>::Lut: Sync,
+{
+    type Context = <P::Component as GammaComponent>::Lut;
+
+    #[inline(always)]
+    fn to_rgb(self, n: usize, lut: &Self::Context) -> RGBLU {
+        self.to_linear(lut).to_rgb(n, &())
     }
 }
 
@@ -280,6 +299,70 @@ impl<T> Downsample for ImgRef<'_, T> where T: Average4 + Copy + Sync + Send {
 
         Some(Img::new(scaled, half_width, half_height))
     }
+}
+
+/// Downsampling for gamma-encoded integer pixels (`RGBA<u8>`, `RGB<u16>`,
+/// `Gray`, `GrayAlpha`, …): linearizes each pixel and averages in linear
+/// space — equivalent to `to_rgbaplu()` + `downsample()` without
+/// materializing the intermediate buffer.
+///
+/// Written per concrete type (a blanket impl would overlap the `Average4`
+/// impls above, since nothing rules out a type satisfying both bounds).
+macro_rules! downsample_gamma_pixel {
+    ($($t:ty),+ $(,)?) => {$(
+        impl Downsample for ImgVec<$t> {
+            type Output = ImgVec<RGBAPLU>;
+
+            fn downsample(&self) -> Option<Self::Output> {
+                self.as_ref().downsample()
+            }
+        }
+
+        impl Downsample for ImgRef<'_, $t> {
+            type Output = ImgVec<RGBAPLU>;
+
+            fn downsample(&self) -> Option<Self::Output> {
+                let stride = self.stride();
+                let width = self.width();
+                let height = self.height();
+
+                if width < 8 || height < 8 {
+                    return None;
+                }
+
+                let half_height = height / 2;
+                let half_width = width / 2;
+                let lut = <$t>::make_lut();
+
+                let mut scaled = Vec::with_capacity(half_width * half_height);
+                scaled.extend(self.buf().chunks(stride * 2).take(half_height).flat_map(|pair| {
+                    let lut = &lut;
+                    let (top, bot) = pair.split_at(stride);
+                    let top = &top[0..half_width * 2];
+                    let bot = &bot[0..half_width * 2];
+
+                    top.as_chunks::<2>().0.iter()
+                        .zip(bot.chunks_exact(2))
+                        .map(move |(a, b)| Average4::average4(
+                            a[0].to_linear(lut), a[1].to_linear(lut),
+                            b[0].to_linear(lut), b[1].to_linear(lut),
+                        ))
+                }));
+
+                assert_eq!(half_width * half_height, scaled.len());
+                Some(Img::new(scaled, half_width, half_height))
+            }
+        }
+    )+}
+}
+
+downsample_gamma_pixel! {
+    RGBA<u8>, RGBA<u16>,
+    RGB<u8>, RGB<u16>,
+    BGRA<u8>, BGRA<u16>,
+    BGR<u8>, BGR<u16>,
+    Gray<u8>, Gray<u16>,
+    GrayAlpha<u8>, GrayAlpha<u16>,
 }
 
 #[allow(dead_code)]
