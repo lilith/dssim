@@ -41,6 +41,13 @@ struct DssimChan<T> {
     pub width: usize,
     pub height: usize,
     pub img: ImgVec<T>,
+    moments: Option<CachedMoments<T>>,
+}
+
+#[derive(Clone)]
+struct CachedMoments<T> {
+    mu: Vec<T>,
+    squared: Vec<T>,
 }
 
 /// Configuration for the comparison
@@ -48,6 +55,7 @@ struct DssimChan<T> {
 pub struct Dssim {
     scale_weights: Vec<f64>,
     save_maps_scales: u8,
+    low_memory: bool,
 }
 
 #[derive(Clone)]
@@ -94,11 +102,8 @@ pub fn new() -> Dssim {
 }
 
 impl DssimChan<f32> {
-    /// Stores only the (optionally chroma-pre-blurred) image plane.
-    /// `mu`, `img_sq_blur`, and `img1_img2_blur` are derived at compare
-    /// time: keeping them persistent costs 8 more bytes per pixel per
-    /// channel, which dominates peak RSS for large images.
-    pub fn new(mut bitmap: ImgVec<f32>, is_chroma: bool, tmp: &mut [MaybeUninit<f32>]) -> Self {
+    /// Prepare the image plane, optionally retaining the same moments as #197.
+    pub fn new(mut bitmap: ImgVec<f32>, is_chroma: bool, low_memory: bool, tmp: &mut [MaybeUninit<f32>]) -> Self {
         let width = bitmap.width();
         let height = bitmap.height();
         assert!(width > 0);
@@ -109,11 +114,13 @@ impl DssimChan<f32> {
         if is_chroma {
             blur::blur_in_place(bitmap.as_mut(), tmp);
         }
-        Self {
-            width,
-            height,
-            img: bitmap,
-        }
+        let moments = if low_memory { None } else {
+            Some(CachedMoments {
+                mu: blur::blur(bitmap.as_ref(), tmp).into_contiguous_buf().0,
+                squared: blur::blur_mul(bitmap.as_ref(), bitmap.as_ref(), tmp),
+            })
+        };
+        Self { width, height, img: bitmap, moments }
     }
 }
 
@@ -124,6 +131,7 @@ impl Dssim {
         Self {
             scale_weights: DEFAULT_WEIGHTS[..].to_owned(),
             save_maps_scales: 0,
+            low_memory: false,
         }
     }
 
@@ -135,6 +143,18 @@ impl Dssim {
     /// Set how many scales will be kept for saving
     pub fn set_save_ssim_maps(&mut self, num_scales: u8) {
         self.save_maps_scales = num_scales;
+    }
+
+    /// Trade repeated-comparison speed for lower memory use in subsequently
+    /// created images. Disabled by default: images retain their blurred means
+    /// and squared moments for reuse. Enabling this stores only image planes
+    /// and computes the missing moments during each comparison.
+    ///
+    /// Existing images are unaffected. Cached and low-memory images can be
+    /// compared together: for example, create a reusable reference first,
+    /// then enable this option before creating one-use candidates.
+    pub fn set_low_memory(&mut self, enabled: bool) {
+        self.low_memory = enabled;
     }
 
     /// Create image from an array of RGBA pixels (sRGB, non-premultiplied, alpha last).
@@ -178,14 +198,14 @@ impl Dssim {
     {
         let num_scales = self.scale_weights.len();
         let mut scale = Vec::with_capacity(num_scales);
-        Self::make_scales_recursive(num_scales, MaybeArc::Borrowed(src_img), &mut scale);
+        Self::make_scales_recursive(num_scales, MaybeArc::Borrowed(src_img), &mut scale, self.low_memory);
         scale.reverse(); // depth-first made smallest scales first
 
         Some(DssimImage { scale })
     }
 
     #[inline(never)]
-    fn make_scales_recursive<InBitmap, OutBitmap>(scales_left: usize, image: MaybeArc<'_, InBitmap>, scales: &mut Vec<DssimChanScale<f32>>)
+    fn make_scales_recursive<InBitmap, OutBitmap>(scales_left: usize, image: MaybeArc<'_, InBitmap>, scales: &mut Vec<DssimChanScale<f32>>, low_memory: bool)
     where
         InBitmap: ToLABBitmap + Send + Sync + Downsample<Output = OutBitmap>,
         OutBitmap: ToLABBitmap + Send + Sync + Downsample<Output = OutBitmap>,
@@ -202,7 +222,7 @@ impl Dssim {
                         let h = l.height();
                         let pixels = w * h;
                         let mut tmp = Vec::with_capacity(pixels);
-                        DssimChan::new(l, n > 0, &mut tmp.spare_capacity_mut()[..pixels])
+                        DssimChan::new(l, n > 0, low_memory, &mut tmp.spare_capacity_mut()[..pixels])
                     }).collect(),
                 }
             }
@@ -213,7 +233,7 @@ impl Dssim {
                     let down = image.downsample();
                     drop(image);
                     if let Some(downsampled) = down {
-                        Self::make_scales_recursive(scales_left - 1, MaybeArc::Owned(Arc::new(downsampled)), scales);
+                        Self::make_scales_recursive(scales_left - 1, MaybeArc::Owned(Arc::new(downsampled)), scales, low_memory);
                     }
                 }
             }

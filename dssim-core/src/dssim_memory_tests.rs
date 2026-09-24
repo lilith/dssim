@@ -21,6 +21,7 @@ fn fused_compare_bitexact_vs_plane_path() {
                 width: img.width(),
                 height: img.height(),
                 img,
+                moments: None,
             }).collect(),
         }
     }
@@ -69,13 +70,30 @@ fn fused_compare_bitexact_vs_plane_path() {
         for nchan in [1usize, 3] {
             let orig = mk_scale((0..nchan).map(|c| mkimg(w, h, 0x1111 + c as u32)).collect());
             let modif = mk_scale((0..nchan).map(|c| mkimg(w, h, 0x9999 + c as u32)).collect());
-            let fused = Dssim::compare_scale_fused(&orig, &modif);
             let expected = reference(&orig, &modif);
-            assert_eq!(
-                fused.pixels().map(f32::to_bits).collect::<Vec<_>>(),
-                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-                "fused compare diverged at {w}x{h} nchan={nchan}",
-            );
+            for cached_orig in [false, true] {
+                for cached_mod in [false, true] {
+                    let mut orig = orig.clone();
+                    let mut modif = modif.clone();
+                    for (scale, cached) in [(&mut orig, cached_orig), (&mut modif, cached_mod)] {
+                        if cached {
+                            for c in &mut scale.chan {
+                                let mut tmp = vec![MaybeUninit::uninit(); w * h];
+                                c.moments = Some(CachedMoments {
+                                    mu: blur::blur(c.img.as_ref(), &mut tmp).into_contiguous_buf().0,
+                                    squared: blur::blur_mul(c.img.as_ref(), c.img.as_ref(), &mut tmp),
+                                });
+                            }
+                        }
+                    }
+                    let fused = Dssim::compare_scale_fused(&orig, &modif);
+                    assert_eq!(
+                        fused.pixels().map(f32::to_bits).collect::<Vec<_>>(),
+                        expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                        "compare diverged at {w}x{h} nchan={nchan} cached={cached_orig}/{cached_mod}",
+                    );
+                }
+            }
         }
     }
 }
@@ -96,7 +114,7 @@ fn fused_compare_identical_is_one() {
                     }).collect::<Vec<_>>(),
                     w, h,
                 )
-            }).map(|img| DssimChan { width: w, height: h, img }).collect(),
+            }).map(|img| DssimChan { width: w, height: h, img, moments: None }).collect(),
         }
     }
     for &(w, h) in &[(1usize, 1usize), (5, 5), (17, 33), (64, 40)] {
@@ -107,6 +125,38 @@ fn fused_compare_identical_is_one() {
                 fused.buf().iter().all(|&v| v == 1.0),
                 "{w}x{h} nchan={nchan}: identical-image ssim != 1.0",
             );
+        }
+    }
+}
+
+
+#[test]
+fn storage_policy_affects_only_new_images_and_preserves_results() {
+    let (w, h) = (33, 35);
+    let pixels: Vec<_> = (0..w*h).map(|i| RGB::new((i*13) as u8, (i*31) as u8, (i*7) as u8)).collect();
+    let changed: Vec<_> = pixels.iter().map(|p| RGB::new(p.r.wrapping_add(9), p.g, p.b)).collect();
+    let mut d = Dssim::new();
+    d.set_save_ssim_maps(8);
+    let cached = d.create_image_rgb(&pixels, w, h).unwrap();
+    let cached_changed = d.create_image_rgb(&changed, w, h).unwrap();
+    d.set_low_memory(true);
+    let small = d.create_image_rgb(&pixels, w, h).unwrap();
+    let small_changed = d.create_image_rgb(&changed, w, h).unwrap();
+    d.set_low_memory(false);
+    let again = d.create_image_rgb(&pixels, w, h).unwrap();
+    for (image, cached) in [(&cached, true), (&cached_changed, true), (&small, false), (&small_changed, false), (&again, true)] {
+        assert!(image.scale.iter().flat_map(|s| &s.chan).all(|c| c.moments.is_some() == cached));
+    }
+    let fingerprint = |a: &DssimImage<f32>, b: &DssimImage<f32>| {
+        let (score, maps) = d.compare(a, b);
+        (f64::from(score).to_bits(), maps.iter().map(|m| (
+            m.ssim.to_bits(), m.map.pixels().map(f32::to_bits).collect::<Vec<_>>()
+        )).collect::<Vec<_>>())
+    };
+    let expected = fingerprint(&cached, &cached_changed);
+    for a in [&cached, &small, &again] {
+        for b in [&cached_changed, &small_changed] {
+            assert_eq!(fingerprint(a, b), expected);
         }
     }
 }
