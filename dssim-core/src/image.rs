@@ -210,13 +210,28 @@ fn downsample_row_pair_base<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut 
     downsample_row_pair_inline(top, bot, out)
 }
 
+/// AVX2+FMA clone of `downsample_row_pair_base`; same source, vectorized wider.
+/// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn downsample_row_pair_avx2<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+fn downsample_row_pair_avx2<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    downsample_row_pair_inline(top, bot, out)
+}
+
+/// AVX-512 (x86-64-v4) clone; same source, vectorized to 512-bit.
+/// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+fn downsample_row_pair_avx512<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
     downsample_row_pair_inline(top, bot, out)
 }
 
 fn downsample_row_pair<T: Average4 + Copy>(top: &[T], bot: &[T], out: &mut [std::mem::MaybeUninit<T>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx512_v4() {
+        // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+        return unsafe { downsample_row_pair_avx512(top, bot, out) };
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::caps::has_avx2_fma() {
         // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
@@ -250,9 +265,22 @@ where
     downsample_gamma_row_pair_inline(top, bot, lut, out)
 }
 
+/// AVX2+FMA clone of `downsample_gamma_row_pair_base`.
+/// SAFETY: call only when `caps::has_avx2_fma()` has confirmed support.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn downsample_gamma_row_pair_avx2<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
+fn downsample_gamma_row_pair_avx2<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
+where
+    P: GammaPixel<Output = RGBAPLU> + Copy,
+{
+    downsample_gamma_row_pair_inline(top, bot, lut, out)
+}
+
+/// AVX-512 (x86-64-v4) clone; same source, vectorized to 512-bit.
+/// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+fn downsample_gamma_row_pair_avx512<P>(top: &[P], bot: &[P], lut: &<P::Component as GammaComponent>::Lut, out: &mut [std::mem::MaybeUninit<RGBAPLU>])
 where
     P: GammaPixel<Output = RGBAPLU> + Copy,
 {
@@ -263,6 +291,11 @@ fn downsample_gamma_row_pair<P>(top: &[P], bot: &[P], lut: &<P::Component as Gam
 where
     P: GammaPixel<Output = RGBAPLU> + Copy,
 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx512_v4() {
+        // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+        return unsafe { downsample_gamma_row_pair_avx512(top, bot, lut, out) };
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::caps::has_avx2_fma() {
         // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.

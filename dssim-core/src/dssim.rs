@@ -452,11 +452,26 @@ fn ssim3_range_avx2(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32
     ssim3_range_inline(s, base, out);
 }
 
-/// Runtime dispatch: AVX2+FMA kernel when detected, baseline otherwise.
-/// On statically-enabled builds `has_avx2_fma()` is a constant `true` and
-/// this collapses to the AVX2 wrapper unconditionally.
+/// x86-64-v4 clone of `ssim3_range_base` (AVX-512 F/BW/DQ/VL —
+/// `avx512cd` unused by these kernels).
+/// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+fn ssim3_range_avx512(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
+    ssim3_range_inline(s, base, out);
+}
+
+/// Runtime dispatch: best AVX-512/AVX2 kernel when detected, baseline
+/// otherwise. On statically-enabled builds the checks are constants.
 #[inline]
 fn ssim3_range(s: &Ssim3Planes<'_>, base: usize, out: &mut [MaybeUninit<f32>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx512_v4() {
+        // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+        unsafe { ssim3_range_avx512(s, base, out) };
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::caps::has_avx2_fma() {
         // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
@@ -509,9 +524,26 @@ fn ssim1_range_avx2(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
     ssim1_range_inline(p, out);
 }
 
-/// Runtime dispatch: AVX2+FMA kernel when detected, baseline otherwise.
+/// x86-64-v4 clone of `ssim1_range_base` (AVX-512 F/BW/DQ/VL —
+/// `avx512cd` unused by these kernels).
+/// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+fn ssim1_range_avx512(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+    ssim1_range_inline(p, out);
+}
+
+/// Runtime dispatch: best AVX-512/AVX2 kernel when detected, baseline
+/// otherwise.
 #[inline]
 fn ssim1_range(p: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx512_v4() {
+        // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+        unsafe { ssim1_range_avx512(p, out) };
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::caps::has_avx2_fma() {
         // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.

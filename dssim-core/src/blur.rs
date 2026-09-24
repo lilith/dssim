@@ -63,11 +63,27 @@ mod portable {
         blur5_inner_inline(r, out);
     }
 
+    /// x86-64-v4 clone of `blur5_inner_base` (AVX-512 F/BW/DQ/VL —
+    /// `avx512cd` unused by these kernels).
+    /// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+    fn blur5_inner_avx512(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        blur5_inner_inline(r, out);
+    }
+
     /// Runtime dispatch, resolved once per row — a cached atomic load is
     /// free next to a full row of work, and on statically-enabled builds
     /// the check is a constant `true`.
     #[inline]
     fn blur5_inner(r: [&[f32]; 5], out: &mut [MaybeUninit<f32>]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx512_v4() {
+            // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+            unsafe { blur5_inner_avx512(r, out) };
+            return;
+        }
         #[cfg(target_arch = "x86_64")]
         if crate::caps::has_avx2_fma() {
             // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
@@ -167,9 +183,25 @@ mod portable {
         v5_combine_row_inline(taps, edge, out);
     }
 
+    /// x86-64-v4 clone of `v5_combine_row_base` (AVX-512 F/BW/DQ/VL —
+    /// `avx512cd` unused by these kernels).
+    /// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+    fn v5_combine_row_avx512(taps: [&[f32]; 5], edge: V5Edge, out: &mut [MaybeUninit<f32>]) {
+        v5_combine_row_inline(taps, edge, out);
+    }
+
     /// Runtime dispatch, resolved once per row.
     #[inline]
     fn v5_combine_row(taps: [&[f32]; 5], edge: V5Edge, out: &mut [MaybeUninit<f32>]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx512_v4() {
+            // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+            unsafe { v5_combine_row_avx512(taps, edge, out) };
+            return;
+        }
         #[cfg(target_arch = "x86_64")]
         if crate::caps::has_avx2_fma() {
             // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
@@ -292,10 +324,26 @@ mod portable {
         blur_h5_moments_row_inline(r1, r2, rows);
     }
 
+    /// x86-64-v4 clone of `blur_h5_moments_row_base` (AVX-512 F/BW/DQ/VL
+    /// — `avx512cd` unused by these kernels).
+    /// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+    #[cfg(target_arch = "x86_64")]
+    #[inline(never)]
+    #[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+    fn blur_h5_moments_row_avx512(r1: &[f32], r2: &[f32], rows: [&mut [MaybeUninit<f32>]; 5]) {
+        blur_h5_moments_row_inline(r1, r2, rows);
+    }
+
     /// Row-level dispatch for the fused horizontal moments pass.
     /// `rows[p]` gets the horizontal blur of `r1`, `r2`, `r1*r1`,
     /// `r2*r2`, `r1*r2` respectively.
     pub fn blur_moments_row(r1: &[f32], r2: &[f32], rows: [&mut [MaybeUninit<f32>]; 5]) {
+        #[cfg(target_arch = "x86_64")]
+        if crate::caps::has_avx512_v4() {
+            // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+            unsafe { blur_h5_moments_row_avx512(r1, r2, rows) };
+            return;
+        }
         #[cfg(target_arch = "x86_64")]
         if crate::caps::has_avx2_fma() {
             // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.

@@ -197,13 +197,32 @@ fn rgb_to_lab_row_avx2<T, C>(in_row: &[T], y: usize, conv: &C,
     rgb_to_lab_row_inline(in_row, y, conv, l_row, a_row, b_row)
 }
 
-/// Runtime dispatch: AVX2+FMA kernel when detected, baseline otherwise.
-/// aarch64 needs no clone — NEON is its baseline and autovectorizes.
+/// AVX-512 (x86-64-v4) clone; same source, vectorized to 512-bit.
+/// SAFETY: call only when `caps::has_avx512_v4()` has confirmed support.
+#[cfg(target_arch = "x86_64")]
+#[inline(never)]
+#[target_feature(enable = "avx2,fma,avx512f,avx512bw,avx512dq,avx512vl")]
+fn rgb_to_lab_row_avx512<T, C>(in_row: &[T], y: usize, conv: &C,
+    l_row: &mut [MaybeUninit<f32>], a_row: &mut [MaybeUninit<f32>], b_row: &mut [MaybeUninit<f32>])
+    where T: Copy, C: LabConv<T>
+{
+    rgb_to_lab_row_inline(in_row, y, conv, l_row, a_row, b_row)
+}
+
+/// Runtime dispatch: widest confirmed clone first — AVX-512 v4, then
+/// AVX2+FMA, then baseline. aarch64 needs no clone — NEON is its
+/// baseline and autovectorizes.
 #[inline]
 fn rgb_to_lab_row<T, C>(in_row: &[T], y: usize, conv: &C,
     l_row: &mut [MaybeUninit<f32>], a_row: &mut [MaybeUninit<f32>], b_row: &mut [MaybeUninit<f32>])
     where T: Copy, C: LabConv<T>
 {
+    #[cfg(target_arch = "x86_64")]
+    if crate::caps::has_avx512_v4() {
+        // SAFETY: has_avx512_v4() confirmed the AVX-512 v4 set.
+        unsafe { rgb_to_lab_row_avx512(in_row, y, conv, l_row, a_row, b_row) };
+        return;
+    }
     #[cfg(target_arch = "x86_64")]
     if crate::caps::has_avx2_fma() {
         // SAFETY: has_avx2_fma() confirmed AVX2+FMA support.
