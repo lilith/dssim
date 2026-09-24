@@ -127,3 +127,5 @@ Mac, 6 worker(s):
 | prepare_pair_compare | 18.14–18.69 | 12.70–12.87 |
 
 The earlier controlled Linux series measured the same main pipeline at 339–345 ms (one worker), versus 103–104 ms for dispatch. The final series was 415–416 ms versus 99–104 ms. Both sets are retained; this host variability rules out treating a single speedup ratio as a guarantee. Six-worker and native comparisons are especially noisy.
+
+[Follow-up Mac native controls and SSIM ablation](mac-native-check.md) compare both revisions with and without `-C target-cpu=native` and identify the source of the ARM improvement.
