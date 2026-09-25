@@ -1,5 +1,7 @@
 # Rechecking SSIM chunk size
 
+> For current end-to-end results, including preparation costs, upstream main, and the current per-image caching API, use the [preparation and caching benchmark](https://github.com/lilith/dssim/blob/bench/e2e-cache-review/benchmarks/e2e/README.md). This report retains earlier experiments at their stated revisions and settings; its timings should not be mixed with the newer matrix.
+
 The original dispatch work changed the RGB SSIM map iteration from
 `with_min_len(1024)` to `par_chunks_mut(4096)`. Commit 388414e's comment says the
 4096 size was chosen to amortize capability checks. PR #197 carries that choice
