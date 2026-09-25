@@ -1,0 +1,13 @@
+{
+  "dssim-core/src/blur/equiv_tests.rs": "623b1ca6d3e986d6c77542ec0a4585aca64073610a86cce3e036573bf6fdc6aa",
+  "dssim-core/src/blur.rs": "3846a5badcf88eafc1624b12db59131d33625a1061d31a80e8e87c12bfeef673",
+  "dssim-core/src/c_api.rs": "5129aea856f53f391266b1e4dff681393d168e5e1fd52ab04af028ea243c0297",
+  "dssim-core/src/dssim.rs": "80a23705175e5b3377a4967b2ffdf50fbe8ca743338d29bc984f5aac55773527",
+  "dssim-core/src/ffi.rs": "f79d709979784b0c2be1fa9ed9393c8675a3c73c4799044d220d1083d16ee58f",
+  "dssim-core/src/image.rs": "9d2a13e5ba71f0e3e26f02b65fa9d6c7aeb916aa4801d7fa637ee436eb8718e6",
+  "dssim-core/src/lib.rs": "54533d1c5a8087c70f7191efeebeee99e809c392bc3a244759e8a4486252101d",
+  "dssim-core/src/lieon.rs": "257b253f6b9ee3ff0b2215f3c64939c304f5f3a7f18552cbef2a3e89155e13a2",
+  "dssim-core/src/linear.rs": "b776341993b535a1e3b98b2a9f2d4050bb2da40f9df3aedec0099a3c7ff1ee09",
+  "dssim-core/src/tolab.rs": "809c5e812879a1fb694905c3b6ba2e497ad09c21ddbff7e877ec08c137884f9e",
+  "dssim-core/src/val.rs": "1fbd3115e02c6077794dd353a7001bc531d2539171aca91f2e32b3066ae910f1"
+}

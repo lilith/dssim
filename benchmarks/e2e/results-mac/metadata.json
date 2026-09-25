@@ -1,0 +1,30 @@
+{
+  "host": "mac",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "time": 1790307851.877565,
+  "revisions": {
+    "main": "0e44c9b7fe91a5265c8e463436c28512186fe9cd",
+    "dispatch": "eb41ae307bfda358e41c022df2e2956fe5fd868c",
+    "fusion": "27a478073263aef6fad9b095c466dc77a1b85033",
+    "options": "331b56cf8998d89c3c89444880f8a0f51f046fb8"
+  },
+  "allocator": "system defaults",
+  "warmup_ms": 100,
+  "batch_ms": 100,
+  "batches": 7,
+  "rounds": 3,
+  "phase_timing": true,
+  "inputs": "RGBA8 reference and four rotating candidates",
+  "linux_affinity": {
+    "1": "2",
+    "6": "0-5"
+  },
+  "rustc": "rustc 1.90.0 (1159e78c4 2025-09-14)\nbinary: rustc\ncommit-hash: 1159e78c4747b02ef996e55082b704c09b970588\ncommit-date: 2025-09-14\nhost: aarch64-apple-darwin\nrelease: 1.90.0\nLLVM version: 20.1.8\n",
+  "binaries": {
+    "main": "acf78933b4eedea46d830069de3f311bd18a36be426da9b5e3df116ec19c6006",
+    "dispatch": "f1eedf71417966a52f2a33f990d48212930dc65e6ed3b2c45568c78983af9b2d",
+    "fusion": "0da12700cd6a77107f425a52750424160d967048e8d920afb2406322220916f7",
+    "options": "8717000973ce18b456a8395c702588a526f402dd4fd3e16f58471416d4c93e1e"
+  },
+  "hardware": "hw.model: Mac16,11\nhw.memsize: 25769803776\nhw.physicalcpu: 12\nhw.perflevel0.physicalcpu: 8\nhw.perflevel1.physicalcpu: 4\n"
+}

@@ -1,0 +1,23 @@
+{
+  "dssim-core/src/blur/equiv_tests.rs": "623b1ca6d3e986d6c77542ec0a4585aca64073610a86cce3e036573bf6fdc6aa",
+  "dssim-core/src/blur/moments.rs": "fa7a8fd8a6c144a22652f6683fd961759f8eee3d6d6833559e84ed81f82f4ffe",
+  "dssim-core/src/blur/moments_tests.rs": "a66d518d914f8d7e3b2951f9158b90c0639ce45f519bfd2cde9741bba8a75d97",
+  "dssim-core/src/blur/portable/dispatch_tests.rs": "f635160feebe9a91ee5ab9267cbd8a81c4e7998f08672d81f7efb63d1ce72545",
+  "dssim-core/src/blur.rs": "c69a45a1fb6859a920a90bfa6aad7e83e1ce9faa28819ec555630024da6763eb",
+  "dssim-core/src/c_api.rs": "5129aea856f53f391266b1e4dff681393d168e5e1fd52ab04af028ea243c0297",
+  "dssim-core/src/caps.rs": "702012950a3e90c6275afc1da2074495b568ad5bda1b670a36240aef2bb1aa57",
+  "dssim-core/src/dssim.rs": "9ed2a7eab935f7868495716c7715e0bbfc4f79a4a5c02f0210dfb2b6be97dbfb",
+  "dssim-core/src/dssim_dispatch_tests.rs": "0d955eaae8ae37413c90c3980b1f6eff833b3ae1760cc232c334923760cf046e",
+  "dssim-core/src/dssim_memory_tests.rs": "33f56e8388f1d801b6b8c1302fb46c01978aec5051d872dc63a66e4bd666755a",
+  "dssim-core/src/dssim_rows.rs": "0070d20a736823a751ef120c4409b46bd33104f98e4837e12a5171521fcec119",
+  "dssim-core/src/ffi.rs": "f79d709979784b0c2be1fa9ed9393c8675a3c73c4799044d220d1083d16ee58f",
+  "dssim-core/src/image/dispatch_tests.rs": "031391a0c8930010ae2f9e56d4d26dd4c67f458af14ba86fe223abc2bf78ebad",
+  "dssim-core/src/image.rs": "665d2312324a2c94e8e193dc7dd07d14f23ce21923b6dfdaee1680a02dbb348b",
+  "dssim-core/src/lib.rs": "b22cdf7dd7fb6b5103d32ba9131ef3d692c2e190f77a3c5f5151869014fecd48",
+  "dssim-core/src/lieon.rs": "1fe83f046e9ab8b3468c47c9a0df19eed5e1f3b776b45608168b22f1d3965bf3",
+  "dssim-core/src/linear.rs": "d802c02d84801105c70061885c191d7181ba4442ec64ea448e6bbe2177986aa9",
+  "dssim-core/src/tolab/dispatch_tests.rs": "45f3a6058b3d9e6d519a1258d992f86f596294ff5a0bb62febfb837839860cc7",
+  "dssim-core/src/tolab/fused_tests.rs": "17a533db6053751fcd6c3a23b2ca1597805a96e4320a52f52459f493e070c9ed",
+  "dssim-core/src/tolab.rs": "729798e86a6c5b875bbbb5fc041a564f175d25f34befbe0db4c067129075f17b",
+  "dssim-core/src/val.rs": "1fbd3115e02c6077794dd353a7001bc531d2539171aca91f2e32b3066ae910f1"
+}
