@@ -1,5 +1,7 @@
 # Memory reductions above PR #197
 
+> For current end-to-end results, including preparation costs, upstream main, and the current per-image caching API, use the [preparation and caching benchmark](https://github.com/lilith/dssim/blob/bench/e2e-cache-review/benchmarks/e2e/README.md). This report retains earlier experiments at their stated revisions and settings; its timings should not be mixed with the newer matrix.
+
 Two independently reviewable commits above the exact dispatch-only PR head. Results collected 2026-09-23. The current revisions use a private adapter and do not add public integer-image trait implementations. Historical timing tables below remain explicitly tied to the earlier revisions; parity, tests, compatibility and one-worker allocation measurements were rerun on the private-adapter revisions.
 
 | Version | Commit | Scope |
