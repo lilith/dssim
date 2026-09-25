@@ -25,14 +25,14 @@ assert len(rows)==216, f'Expected 216 accepted observations, found {len(rows)}'
 assert all(len(g)==3 for g in groups.values()), 'Missing or duplicate rounds'
 assert all(len(s)==1 for s in scores.values()), f'Score mismatch: {scores}'
 with (root/'results.csv').open('w') as f:
-    w=csv.DictWriter(f,fieldnames=list(rows[0]));w.writeheader();w.writerows(rows)
+    w=csv.DictWriter(f,fieldnames=list(rows[0]),lineterminator='\n');w.writeheader();w.writerows(rows)
 summary={}
 for k,group in groups.items():
     g=sorted(group,key=lambda r:r['median_ms'])
     summary[k]=dict(g[1],min_ms=g[0]['median_ms'],max_ms=g[2]['median_ms'],
                    reference_once_ms=statistics.median(r['reference_once_ms'] for r in g))
 with (root/'summary.csv').open('w') as f:
-    w=csv.DictWriter(f,fieldnames=[x for x in next(iter(summary.values())) if not x.startswith('batch_')])
+    w=csv.DictWriter(f,fieldnames=[x for x in next(iter(summary.values())) if not x.startswith('batch_')],lineterminator='\n')
     w.writeheader();w.writerows({k:v for k,v in r.items() if not k.startswith('batch_')} for _,r in sorted(summary.items()))
 lines=[]
 variants={
