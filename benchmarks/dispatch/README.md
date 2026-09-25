@@ -1,5 +1,7 @@
 Codec-free dispatch benchmarks and output checks for the runtime-autovectorization PR.
 
+> For current end-to-end results, including preparation costs, upstream main, and the current per-image caching API, use the [preparation and caching benchmark](https://github.com/lilith/dssim/blob/bench/e2e-cache-review/benchmarks/e2e/README.md). This report retains earlier experiments at their stated revisions and settings; its timings should not be mixed with the newer matrix.
+
 Current source anchors: upstream kornelski/main 0e44c9b7fe91a5265c8e463436c28512186fe9cd; dispatch eb41ae3. Upstream merged the no-threads fix (#196) and deterministic scale ordering (#195) during this work, so #197 was rebased to one performance commit directly on that new main. Fresh benchmark and parity runs use these updated sources. The production PR contains kernel changes and tests only; this fork branch holds the reproduction harness and raw measurements.
 
 Historical runs below are explicitly labeled: upstream 6e4579882f97907a75fd84133a4c4993a06d56ea versus dispatch b6ebed5 (before the rebase).
