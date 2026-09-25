@@ -1,5 +1,8 @@
 # Optional cached and low-memory images
 
+> For current end-to-end results, including preparation costs, upstream main, and the current per-image caching API, use the [preparation and caching benchmark](https://github.com/lilith/dssim/blob/bench/e2e-cache-review/benchmarks/e2e/README.md). This report retains earlier experiments at their stated revisions and settings; its timings should not be mixed with the newer matrix.
+> The context-wide flag and `cache_moments` API shown below are superseded by construction-time `ImageOptions::cache_for_reuse` in [#200](https://github.com/kornelski/dssim/pull/200).
+
 Production branch: `perf/memory-modes-197`, commit **f300435f330056a7707e39aa53bad014c34373e8**. It adds one commit above private input fusion 27a4780 and streaming comparison 22e9ab0, both based on PR #197 **eb41ae307bfda358e41c022df2e2956fe5fd868c** (whose parent is upstream main 0e44c9b7fe91a5265c8e463436c28512186fe9cd). Measurements use that exact #197 baseline.
 
 ## API and behavior
