@@ -1,5 +1,8 @@
 # Construction-time, per-image moment caching
 
+> For current end-to-end results, including preparation costs, upstream main, and the current per-image caching API, use the [preparation and caching benchmark](https://github.com/lilith/dssim/blob/bench/e2e-cache-review/benchmarks/e2e/README.md). This report retains earlier experiments at their stated revisions and settings; its timings should not be mixed with the newer matrix.
+> The context-wide flag and `cache_moments` API shown below are superseded by construction-time `ImageOptions::cache_for_reuse` in [#200](https://github.com/kornelski/dssim/pull/200).
+
 Production: `perf/memory-optin-197`, **1b891ad2597d70f21d90ffb874bac53fd00a37c9**.
 This is above private gamma-input fusion 27a4780, streaming moments 22e9ab0,
 and mixed cache support f300435. The exact baseline is PR #197
